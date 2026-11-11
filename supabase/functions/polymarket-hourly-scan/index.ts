@@ -120,7 +120,7 @@ async function getTrades(market: any, start: number, end: number) {
   }
   return { trades: out, truncated: true };
 }
-type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number; historyComplete: boolean };
+type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number };
 function minimumForPrice(price: number): number | null {
   if (price <= 0 || price > 0.2) return null;
   if (price < 0.01) return 500;
@@ -192,14 +192,16 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         const agePoints = 8 * (1 - clamp(ctx.ageDays / settings.account_age_days));
         push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
       }
-      if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3 || !ctx.historyComplete) {
+      if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3) {
         missing.push("wallet_baseline");
       } else {
+        // History is only the portion observed by this radar, not the wallet's complete Polymarket activity.
+        missing.push("wallet_baseline_partial");
         const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
         const anomalyPoints = 12 * clamp(Math.log10(Math.max(1, ratio)) / 2);
-        push("wallet_anomaly", "Mise inhabituelle pour ce portefeuille",
+        push("wallet_anomaly", "Mise inhabituelle dans l'historique observé",
           anomalyPoints,
-          `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction en moyenne sur 30 jours`);
+          `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction observée en moyenne sur 30 jours`);
       }
 
       const liq = liquidity[condition];
@@ -341,7 +343,6 @@ Deno.serve(async (req: Request) => {
             ageDays,
             avgTradeUsd30d: values.length ? values.reduce((a,b)=>a+b,0) / values.length : null,
             tradeCount30d: values.length,
-            historyComplete: !historyError && values.length < 5000,
           };
         }
       }
