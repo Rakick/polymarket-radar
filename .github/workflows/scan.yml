@@ -1,25 +1,33 @@
 name: Scan horaire Polymarket
+
 on:
   schedule:
     - cron: "0 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 concurrency:
-  group: scan
+  group: polymarket-hourly-scan
   cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          # Node 22 provides the native WebSocket implementation required by Supabase Realtime.
           node-version: 22
-      # The repository currently has no committed lockfile. Generate one before
-      # npm ci so the workflow does not fail immediately on a clean checkout.
-      - run: npm install --package-lock-only
-      - run: npm ci
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
       - name: Run hourly scan
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
