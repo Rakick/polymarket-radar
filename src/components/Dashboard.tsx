@@ -21,8 +21,8 @@ const date = (value: string | null | undefined) =>
 const shortWallet = (value: string) => value ? value.slice(0, 8) + "…" + value.slice(-6) : "Inconnu";
 const confidenceLabel = (value: string) => value === "high" ? "Élevée" : value === "medium" ? "Moyenne" : "Faible";
 const missingLabel: Record<string, string> = {
-  account_age: "Ancienneté du portefeuille", wallet_recent_volume: "Volume récent du portefeuille",
-  wallet_total_volume: "Volume total du portefeuille", market_liquidity: "Liquidité du marché",
+  wallet_age: "Ancienneté vérifiée du portefeuille", wallet_baseline: "Historique de transactions du portefeuille",
+  market_liquidity: "Liquidité du marché",
 };
 
 export default function Dashboard() {
@@ -142,7 +142,7 @@ export default function Dashboard() {
               const isOpen = expanded === alert.id;
               return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
-                  <div className="score-column"><span className="score-caption">SCORE</span><strong className={alert.score >= 60 ? "score high" : alert.score >= 30 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/ 100</span></div>
+                  <div className="score-column"><span className="score-caption">{alert.score >= 70 ? "PRIORITAIRE" : alert.score >= 40 ? "NORMALE" : "À SURVEILLER"}</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/ 100</span></div>
                   <div className="alert-main">
                     <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className={`confidence-pill ${alert.confidence}`}>{confidenceLabel(alert.confidence)} confiance</span></div>
                     <div className="alert-meta"><span>{alert.alert_type === "grouped" ? "◉ Activité groupée" : "◉ Transaction isolée"}</span><span>Portefeuille <code>{shortWallet(alert.wallet)}</code></span><span>{date(alert.created_at)}</span></div>
