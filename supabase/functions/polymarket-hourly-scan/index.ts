@@ -17,8 +17,8 @@ type Settings = {
 };
 const defaults: Settings = {
   min_usd: 10000, max_price: 0.2, max_price_inclusive: true, account_age_days: 7,
-  group_window_minutes: 60, categories: ["politics"], scan_overlap_seconds: 300,
-  weights: { adjusted_amount: 30, wallet_anomaly: 25, wallet_age: 5, liquidity_impact: 15, concentration: 8, repetition: 7, coordination: 10 },
+  group_window_minutes: 30, categories: ["politics", "geopolitics", "tech", "economy"], scan_overlap_seconds: 300,
+  weights: { adjusted_amount: 30, wallet_anomaly: 25, wallet_age: 12, concentration: 8, repetition: 15, coordination: 10 },
 };
 
 async function fetchJson<T>(url: string, tries = 3): Promise<T> {
@@ -58,11 +58,12 @@ async function getMarkets(categories: string[]) {
   const markets: any[] = [], errors: string[] = [];
   const seen = new Set<string>();
   for (const category of categories) {
+    const categoryStartCount = markets.length;
     let tag: any;
     try { tag = await fetchJson<any>(`https://gamma-api.polymarket.com/tags/slug/${encodeURIComponent(category)}`); }
     catch (e) { errors.push(`Tag ${category}: ${(e as Error).message}`); continue; }
     if (!tag?.id) { errors.push(`Tag introuvable: ${category}`); continue; }
-    for (let page = 0; page < 5 && markets.length < 500; page++) {
+    for (let page = 0; page < 5 && markets.length - categoryStartCount < 125 && markets.length < 500; page++) {
       const offset = page * 100;
       let batch: any[];
       try {
@@ -85,7 +86,7 @@ async function getMarkets(categories: string[]) {
           outcomes: parseArray(m.outcomes), outcome_prices: parseArray(m.outcomePrices).map(Number),
           closed: false, accepting_orders: true, updated_at: new Date().toISOString(),
         });
-        if (markets.length >= 500) break;
+        if (markets.length - categoryStartCount >= 125 || markets.length >= 500) break;
       }
       if (batch.length < 100) break;
     }
@@ -121,15 +122,20 @@ async function getTrades(market: any, start: number, end: number) {
   return { trades: out, truncated: true };
 }
 type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number };
+const MIN_ALERT_SCORE = 60;
 function minimumForPrice(price: number): number | null {
   if (price <= 0 || price > 0.2) return null;
-  if (price < 0.01) return 500;
-  if (price < 0.05) return 500;
-  if (price < 0.10) return 1000;
-  return 5000;
+  if (price < 0.05) return 1000;
+  if (price < 0.10) return 2500;
+  return 7500;
+}
+async function getPolymarketJoinDate(wallet: string): Promise<string | null> {
+  const profile = await fetchJson<any>(`https://data-api.polymarket.com/v2/user-stats?user=${encodeURIComponent(wallet)}`);
+  const seconds = Number(profile?.data?.join_date);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : null;
 }
 function clamp(value: number, min = 0, max = 1) { return Math.max(min, Math.min(max, value)); }
-function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<string, number | null>, walletContext: Record<string, WalletContext>) {
+function buildAlerts(trades: Trade[], settings: Settings, walletContext: Record<string, WalletContext>) {
   const groups = new Map<string, Trade[]>();
   for (const t of trades.filter(t => {
     if (t.side !== "BUY") return false;
@@ -173,6 +179,8 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       const minPrice = Math.min(...g.map(t => t.price));
       const threshold = minimumForPrice(weightedPrice);
       if (threshold === null || total < threshold) continue;
+      const exceptionalSingle = g.length === 1 && total >= threshold * 5;
+      if (g.length < 2 && !exceptionalSingle) continue;
 
       const factors: any[] = [], missing: string[] = [];
       const push = (code: string, label: string, points: number, detail: string) => {
@@ -190,7 +198,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       const ctx = walletContext[wallet];
       if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
       else if (ctx.ageDays <= settings.account_age_days) {
-        const agePoints = (settings.weights.wallet_age ?? 5) * (1 - clamp(ctx.ageDays / settings.account_age_days));
+        const agePoints = (settings.weights.wallet_age ?? 12) * (1 - clamp(ctx.ageDays / settings.account_age_days));
         push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
       }
       if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3) {
@@ -205,12 +213,6 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
           `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction observée en moyenne sur 30 jours`);
       }
 
-      const liq = liquidity[condition];
-      if (liq == null || liq <= 0) missing.push("market_liquidity");
-      else push("liquidity_impact", "Poids de la mise dans la liquidité",
-        (settings.weights.liquidity_impact ?? 15) * clamp(total / liq / 0.10),
-        `${Math.round(total)} $ pour ${Math.round(liq)} $ de liquidité`);
-
       const outcomeAmounts = new Map<string, number>();
       for (const trade of g) {
         const outcome = trade.outcome ?? "unknown";
@@ -222,7 +224,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
           `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
       }
       const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
-      const repetition = (settings.weights.repetition ?? 7) * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
+      const repetition = (settings.weights.repetition ?? 15) * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
       push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
 
       const coordinatedWallets = new Set<string>();
@@ -236,6 +238,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         coordinatedWallets.size ? `${coordinatedWallets.size} autres portefeuilles sur le même résultat et créneau` : "Aucun autre portefeuille simultané identifié");
 
       const score = Math.max(0, Math.min(100, Math.round(factors.reduce((a,x)=>a+x.points,0))));
+      if (score < MIN_ALERT_SCORE) continue;
       alerts.push({
         dedupe_key: `${wallet}|${condition}|${g.length === 1 ? "single" : "grouped"}|${g[0].traded_at}`,
         wallet, condition_id: condition, alert_type: g.length === 1 ? "single" : "grouped",
@@ -280,7 +283,9 @@ Deno.serve(async (req: Request) => {
       .order("id", { ascending: true }).limit(1000);
     if (catalogueError) throw new Error(`Lecture du catalogue: ${catalogueError.message}`);
     const latest = (catalogue ?? []).reduce((max, m) => Math.max(max, Date.parse(m.updated_at ?? "1970-01-01")), 0);
-    const needsRefresh = !catalogue?.length || Date.now() - latest > 55 * 60 * 1000;
+    const presentCategories = new Set((catalogue ?? []).map(m => m.category));
+    const missingCategory = settings.categories.some(category => !presentCategories.has(category));
+    const needsRefresh = !catalogue?.length || missingCategory || Date.now() - latest > 55 * 60 * 1000;
     if (needsRefresh) {
       const gamma = await getMarkets(settings.categories);
       errors.push(...gamma.errors);
@@ -325,7 +330,6 @@ Deno.serve(async (req: Request) => {
           else inserted += data?.length ?? 0;
         }
       }
-      const liquidity = Object.fromEntries(markets.map(m => [m.condition_id, m.liquidity]));
       const wallets = [...new Set(unique.filter(t => {
         if (t.side !== "BUY") return false;
         const threshold = minimumForPrice(t.price);
@@ -349,19 +353,30 @@ Deno.serve(async (req: Request) => {
         }
         const stats = new Map((statsRows ?? []).map(row => [row.wallet, row]));
         const meta = new Map((walletRows ?? []).map(row => [row.address, row]));
-        for (const wallet of wallets) {
-          const row = meta.get(wallet);
-          const seen = row?.first_platform_activity_at ?? row?.created_at_verified;
-          const ageDays = seen ? Math.max(0, (Date.now() - Date.parse(seen)) / 86400000) : null;
-          const history = stats.get(wallet);
-          walletContext[wallet] = {
-            ageDays,
-            avgTradeUsd30d: history?.avg_trade_usd == null ? null : Number(history.avg_trade_usd),
-            tradeCount30d: Number(history?.trade_count ?? 0),
-          };
+        for (let i = 0; i < wallets.length; i += 10) {
+          await Promise.all(wallets.slice(i, i + 10).map(async wallet => {
+            const row = meta.get(wallet);
+            let joinDate = row?.created_at_verified ?? null;
+            if (!joinDate) {
+              try {
+                joinDate = await getPolymarketJoinDate(wallet);
+                if (joinDate) {
+                  const { error } = await db.from("wallets").upsert({ address: wallet, created_at_verified: joinDate, updated_at: new Date().toISOString() }, { onConflict: "address" });
+                  if (error) errors.push(`Enregistrement date de création ${wallet}: ${error.message}`);
+                }
+              } catch (e) { errors.push(`Date de création Polymarket ${wallet}: ${(e as Error).message}`); }
+            }
+            const ageDays = joinDate ? Math.max(0, (Date.now() - Date.parse(joinDate)) / 86400000) : null;
+            const history = stats.get(wallet);
+            walletContext[wallet] = {
+              ageDays,
+              avgTradeUsd30d: history?.avg_trade_usd == null ? null : Number(history.avg_trade_usd),
+              tradeCount30d: Number(history?.trade_count ?? 0),
+            };
+          }));
         }
       }
-      const alerts = buildAlerts(unique, settings, liquidity, walletContext);
+      const alerts = buildAlerts(unique, settings, walletContext);
       for (let i=0; i<alerts.length; i+=100) {
         const rows = alerts.slice(i,i+100).map(a => ({ ...a, market_id: markets.find(m => m.condition_id === a.condition_id)?.id ?? "" }));
         const { data, error } = await db.from("alerts").upsert(rows, { onConflict: "dedupe_key" }).select("id");
