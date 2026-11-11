@@ -18,7 +18,7 @@ type Settings = {
 const defaults: Settings = {
   min_usd: 10000, max_price: 0.2, max_price_inclusive: true, account_age_days: 7,
   group_window_minutes: 60, categories: ["politics"], scan_overlap_seconds: 300,
-  weights: { amount: 25, low_price: 20, new_account: 15, concentration: 15, burst: 10, position_share: 10, low_liquidity: 5 },
+  weights: { adjusted_amount: 30, wallet_anomaly: 25, wallet_age: 5, liquidity_impact: 15, concentration: 8, repetition: 7, coordination: 10 },
 };
 
 async function fetchJson<T>(url: string, tries = 3): Promise<T> {
@@ -183,14 +183,14 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       // Equivalent stake normalizes for odds: $1k at 3c ~= $5k at 10c.
       const oddsMultiplier = clamp(Math.pow(0.10 / Math.max(weightedPrice, 0.01), 1.35), 0.5, 10);
       const adjustedAmount = total * oddsMultiplier;
-      const amountPoints = 40 * clamp(Math.log10(Math.max(1, adjustedAmount / 500)) / 1.5);
+      const amountPoints = (settings.weights.adjusted_amount ?? 30) * clamp(Math.log10(Math.max(1, adjustedAmount / 500)) / 1.5);
       push("adjusted_amount", "Montant ajusté à la cote", amountPoints,
         `${Math.round(total)} $ réels · ${Math.round(adjustedAmount)} $ équivalents (cote moyenne ${(weightedPrice*100).toFixed(1)} c)`);
 
       const ctx = walletContext[wallet];
       if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
       else if (ctx.ageDays <= settings.account_age_days) {
-        const agePoints = 8 * (1 - clamp(ctx.ageDays / settings.account_age_days));
+        const agePoints = (settings.weights.wallet_age ?? 5) * (1 - clamp(ctx.ageDays / settings.account_age_days));
         push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
       }
       if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3) {
@@ -199,7 +199,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         // History is only the portion observed by this radar, not the wallet's complete Polymarket activity.
         missing.push("wallet_baseline_partial");
         const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
-        const anomalyPoints = 12 * clamp(Math.log10(Math.max(1, ratio)) / 2);
+        const anomalyPoints = (settings.weights.wallet_anomaly ?? 25) * clamp(Math.log10(Math.max(1, ratio)) / 2);
         push("wallet_anomaly", "Mise inhabituelle dans l'historique observé",
           anomalyPoints,
           `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction observée en moyenne sur 30 jours`);
@@ -208,7 +208,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       const liq = liquidity[condition];
       if (liq == null || liq <= 0) missing.push("market_liquidity");
       else push("liquidity_impact", "Poids de la mise dans la liquidité",
-        15 * clamp(total / liq / 0.10),
+        (settings.weights.liquidity_impact ?? 15) * clamp(total / liq / 0.10),
         `${Math.round(total)} $ pour ${Math.round(liq)} $ de liquidité`);
 
       const outcomeAmounts = new Map<string, number>();
@@ -218,11 +218,11 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       }
       const dominantShare = total > 0 ? Math.max(...outcomeAmounts.values()) / total : 0;
       if (g.length > 1) {
-        push("concentration", "Concentration sur un même résultat", 8 * clamp((dominantShare - 0.5) / 0.5),
+        push("concentration", "Concentration sur un même résultat", (settings.weights.concentration ?? 8) * clamp((dominantShare - 0.5) / 0.5),
           `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
       }
       const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
-      const repetition = 7 * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
+      const repetition = (settings.weights.repetition ?? 7) * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
       push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
 
       const coordinatedWallets = new Set<string>();
@@ -232,7 +232,7 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         for (const other of group ?? []) if (other !== wallet) coordinatedWallets.add(other);
       }
       push("coordination", "Activité simultanée entre portefeuilles",
-        10 * clamp(coordinatedWallets.size / 4),
+        (settings.weights.coordination ?? 10) * clamp(coordinatedWallets.size / 4),
         coordinatedWallets.size ? `${coordinatedWallets.size} autres portefeuilles sur le même résultat et créneau` : "Aucun autre portefeuille simultané identifié");
 
       const score = Math.max(0, Math.min(100, Math.round(factors.reduce((a,x)=>a+x.points,0))));
@@ -335,33 +335,29 @@ Deno.serve(async (req: Request) => {
       if (wallets.length) {
         const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
         const walletRows: any[] = [];
-        const historyRows: any[] = [];
+        const statsRows: any[] = [];
         for (let i = 0; i < wallets.length; i += 10) {
           const batch = wallets.slice(i, i + 10);
-          const [{ data: walletBatch, error: walletError }, { data: historyBatch, error: historyError }] = await Promise.all([
+          const [{ data: walletBatch, error: walletError }, { data: statsBatch, error: statsError }] = await Promise.all([
             db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", batch),
-            db.from("trades").select("wallet,usd_amount").in("wallet", batch).gte("traded_at", since30d).limit(500),
+            db.rpc("wallet_recent_trade_stats", { p_wallets: batch, p_since: since30d }),
           ]);
           if (walletError) errors.push(`Données portefeuilles: ${walletError.message}`);
           else walletRows.push(...(walletBatch ?? []));
-          if (historyError) errors.push(`Historique portefeuilles: ${historyError.message}`);
-          else historyRows.push(...(historyBatch ?? []));
+          if (statsError) errors.push(`Historique portefeuilles: ${statsError.message}`);
+          else statsRows.push(...(statsBatch ?? []));
         }
-        const history = new Map<string, number[]>();
-        for (const row of historyRows) {
-          if (!history.has(row.wallet)) history.set(row.wallet, []);
-          history.get(row.wallet)!.push(Number(row.usd_amount) || 0);
-        }
+        const stats = new Map((statsRows ?? []).map(row => [row.wallet, row]));
         const meta = new Map((walletRows ?? []).map(row => [row.address, row]));
         for (const wallet of wallets) {
           const row = meta.get(wallet);
           const seen = row?.first_platform_activity_at ?? row?.created_at_verified;
           const ageDays = seen ? Math.max(0, (Date.now() - Date.parse(seen)) / 86400000) : null;
-          const values = history.get(wallet) ?? [];
+          const history = stats.get(wallet);
           walletContext[wallet] = {
             ageDays,
-            avgTradeUsd30d: values.length ? values.reduce((a,b)=>a+b,0) / values.length : null,
-            tradeCount30d: values.length,
+            avgTradeUsd30d: history?.avg_trade_usd == null ? null : Number(history.avg_trade_usd),
+            tradeCount30d: Number(history?.trade_count ?? 0),
           };
         }
       }
