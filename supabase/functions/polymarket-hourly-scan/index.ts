@@ -178,7 +178,7 @@ Deno.serve(async (req: Request) => {
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
   const raw = (settingRow?.data ?? {}) as Partial<Settings>;
   const settings: Settings = { ...defaults, ...raw, weights: { ...defaults.weights, ...(raw.weights ?? {}) } };
-  const end = Math.floor(Date.now()/1000), start = end - 6*3600 - settings.scan_overlap_seconds;
+  const end = Math.floor(Date.now()/1000), start = end - 3600 - settings.scan_overlap_seconds;
   const { data: scan, error: startError } = await db.from("scans").insert({
     started_at: new Date().toISOString(), status: "running", window_start: start, window_end: end,
   }).select("id").single();
