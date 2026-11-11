@@ -15,7 +15,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+      # The repository currently has no committed lockfile. Generate one before
+      # npm ci so the workflow does not fail immediately on a clean checkout.
+      - run: npm install --package-lock-only
       - run: npm ci
       - name: Run hourly scan
         env:
