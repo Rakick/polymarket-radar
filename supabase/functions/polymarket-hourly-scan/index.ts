@@ -187,11 +187,9 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         `${Math.round(total)} $ réels · ${Math.round(adjustedAmount)} $ équivalents (cote moyenne ${(weightedPrice*100).toFixed(1)} c)`);
 
       const ctx = walletContext[wallet];
-      let walletPoints = 0;
       if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
       else if (ctx.ageDays <= settings.account_age_days) {
         const agePoints = 8 * (1 - clamp(ctx.ageDays / settings.account_age_days));
-        walletPoints += agePoints;
         push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
       }
       if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3 || !ctx.historyComplete) {
@@ -199,7 +197,6 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
       } else {
         const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
         const anomalyPoints = 12 * clamp(Math.log10(Math.max(1, ratio)) / 2);
-        walletPoints += anomalyPoints;
         push("wallet_anomaly", "Mise inhabituelle pour ce portefeuille",
           anomalyPoints,
           `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction en moyenne sur 30 jours`);
