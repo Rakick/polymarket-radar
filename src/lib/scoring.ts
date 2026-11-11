@@ -4,7 +4,6 @@ export interface ScoreContext {
   walletFirstSeenAt:string|null;
   walletRecentVolumeUsd:number|null;
   walletTotalVolumeUsd:number|null;
-  marketLiquidityUsd:number|null;
   coordinatedWalletCount?:number;
 }
 const clamp=(v:number,min=0,max=1)=>Math.max(min,Math.min(max,v));
@@ -34,16 +33,13 @@ export function computeScore(ctx:ScoreContext,s:Settings) {
   push("adjusted_amount","Montant ajusté à la cote","Odds-adjusted amount",w.adjusted_amount*clamp(Math.log10(Math.max(1,adjusted/500))/1.5),`${Math.round(total)} USD réels · ${Math.round(adjusted)} USD équivalents à ${(weightedPrice*100).toFixed(1)} c`);
   if(ctx.walletFirstSeenAt) {
     const ageDays=Math.max(0,(Date.now()-new Date(ctx.walletFirstSeenAt).getTime())/86400000);
-    push("wallet_age","Ancienneté vérifiée du portefeuille","Verified wallet age",w.wallet_age*(1-clamp(ageDays/s.account_age_days)),`Première activité observée il y a ${ageDays.toFixed(1)} jours`);
+    push("wallet_age","Ancienneté vérifiée du portefeuille","Verified wallet age",w.wallet_age*(1-clamp(ageDays/s.account_age_days)),`Compte Polymarket créé il y a ${ageDays.toFixed(1)} jours`);
   } else missing.push("wallet_age");
   if(ctx.walletRecentVolumeUsd && ctx.walletRecentVolumeUsd>0) {
     const average=ctx.walletRecentVolumeUsd;
     push("wallet_anomaly","Mise inhabituelle dans l'historique observé","Unusual observed wallet stake",w.wallet_anomaly*clamp(Math.log10(Math.max(1,total/average))/2),`${Math.round(total)} USD comparés à ${Math.round(average)} USD de référence observée`);
     missing.push("wallet_baseline_partial");
   } else missing.push("wallet_baseline");
-  if(ctx.marketLiquidityUsd && ctx.marketLiquidityUsd>0) {
-    push("liquidity_impact","Poids de la mise dans la liquidité","Stake relative to liquidity",w.liquidity_impact*clamp(total/ctx.marketLiquidityUsd/.1),`${Math.round(total)} USD pour ${Math.round(ctx.marketLiquidityUsd)} USD de liquidité`);
-  } else missing.push("market_liquidity");
   const outcomes=new Map<string,number>();
   for(const trade of trades) {
     const key=trade.outcome??"unknown";
