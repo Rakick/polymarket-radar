@@ -120,39 +120,110 @@ async function getTrades(market: any, start: number, end: number) {
   }
   return { trades: out, truncated: true };
 }
-function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<string, number | null>) {
+type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number; historyComplete: boolean };
+function minimumForPrice(price: number): number | null {
+  if (price <= 0 || price > 0.2) return null;
+  if (price < 0.01) return 500;
+  if (price < 0.05) return 500;
+  if (price < 0.10) return 1000;
+  return 5000;
+}
+function clamp(value: number, min = 0, max = 1) { return Math.max(min, Math.min(max, value)); }
+function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<string, number | null>, walletContext: Record<string, WalletContext>) {
   const groups = new Map<string, Trade[]>();
-  for (const t of trades.filter(t => t.side === "BUY" && (settings.max_price_inclusive ? t.price <= settings.max_price : t.price < settings.max_price))) {
-    const k = `${t.wallet}|${t.condition_id}`; if (!groups.has(k)) groups.set(k, []); groups.get(k)!.push(t);
+  for (const t of trades.filter(t => {
+    if (t.side !== "BUY") return false;
+    const threshold = minimumForPrice(t.price);
+    return threshold !== null && t.usd_amount >= threshold;
+  })) {
+    const k = `${t.wallet}|${t.condition_id}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(t);
   }
+
+  // Cross-wallet activity is measured only among trades actually fetched in this scan batch.
+  const coordinated = new Map<string, Set<string>>();
+  for (const t of trades) {
+    if (t.side !== "BUY") continue;
+    const bucket = Math.floor(Date.parse(t.traded_at) / 600000);
+    const key = `${t.condition_id}|${t.outcome ?? "unknown"}|${bucket}`;
+    if (!coordinated.has(key)) coordinated.set(key, new Set());
+    coordinated.get(key)!.add(t.wallet);
+  }
+
   const alerts: any[] = [];
   for (const [key, ts] of groups) {
     const [wallet, condition] = key.split("|");
     ts.sort((a,b) => Date.parse(a.traded_at) - Date.parse(b.traded_at));
-    const buckets: Trade[][] = []; let current: Trade[] = [], first = 0;
+    const buckets: Trade[][] = [];
+    let current: Trade[] = [], first = 0;
     for (const t of ts) {
       const time = Date.parse(t.traded_at);
-      if (!current.length || time - first <= settings.group_window_minutes * 60000) { if (!current.length) first = time; current.push(t); }
-      else { buckets.push(current); current = [t]; first = time; }
+      if (!current.length || time - first <= settings.group_window_minutes * 60000) {
+        if (!current.length) first = time;
+        current.push(t);
+      } else { buckets.push(current); current = [t]; first = time; }
     }
     if (current.length) buckets.push(current);
+
     for (const g of buckets) {
       const total = g.reduce((a,t) => a + t.usd_amount, 0);
-      if (total < settings.min_usd) continue;
-      const minPrice = Math.min(...g.map(t => t.price)), w = settings.weights;
-      const factors: any[] = [], missing = ["account_age", "wallet_recent_volume", "wallet_total_volume"];
-      const push = (code: string, label: string, points: number, detail: string) => { if (points > .01) factors.push({ code, label_fr: label, label_en: label, points: Math.round(points * 10) / 10, detail }); };
-      push("amount", "Montant élevé", w.amount * Math.min(1, Math.log10(Math.max(1,total/settings.min_usd))/2), `${Math.round(total)} USD`);
-      push("low_price", "Prix de l'issue bas", w.low_price * (1-Math.min(1,minPrice/settings.max_price)), `prix min ≈ ${(minPrice*100).toFixed(1)} %`);
-      push("new_account", "Âge du compte inconnu", w.new_account / 3, "date inconnue");
-      push("burst", "Achats répétés rapprochés", w.burst * Math.min(1,(g.length-1)/5), `${g.length} achats regroupés`);
+      const weightedPrice = total > 0 ? g.reduce((a,t) => a + t.price * t.usd_amount, 0) / total : 0;
+      const minPrice = Math.min(...g.map(t => t.price));
+      const threshold = minimumForPrice(weightedPrice);
+      if (threshold === null || total < threshold) continue;
+
+      const factors: any[] = [], missing: string[] = [];
+      const push = (code: string, label: string, points: number, detail: string) => {
+        const rounded = Math.round(points * 10) / 10;
+        if (rounded > 0.01) factors.push({ code, label_fr: label, label_en: label, points: rounded, detail });
+      };
+
+      // Equivalent stake normalizes for odds: $1k at 3c ~= $5k at 10c.
+      const oddsMultiplier = clamp(Math.pow(0.10 / Math.max(weightedPrice, 0.01), 1.35), 0.5, 10);
+      const adjustedAmount = total * oddsMultiplier;
+      const amountPoints = 40 * clamp(Math.log10(Math.max(1, adjustedAmount / 500)) / 1.5);
+      push("adjusted_amount", "Montant ajusté à la cote", amountPoints,
+        `${Math.round(total)} $ réels · ${Math.round(adjustedAmount)} $ équivalents (cote moyenne ${(weightedPrice*100).toFixed(1)} c)`);
+
+      const ctx = walletContext[wallet];
+      if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
+      else if (ctx.ageDays <= settings.account_age_days) push("wallet_age", "Portefeuille récent", 20 * (1 - clamp(ctx.ageDays / settings.account_age_days)), `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
+
+      if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3 || !ctx.historyComplete) {
+        missing.push("wallet_baseline");
+      } else {
+        const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
+        push("wallet_anomaly", "Mise inhabituelle pour ce portefeuille",
+          20 * clamp(Math.log10(Math.max(1, ratio)) / 2),
+          `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction en moyenne sur 30 jours`);
+      }
+
       const liq = liquidity[condition];
-      if (liq == null) missing.push("market_liquidity"); else if (liq < 50000) push("low_liquidity", "Liquidité faible", w.low_liquidity, `${Math.round(liq)} USD`);
+      if (liq == null || liq <= 0) missing.push("market_liquidity");
+      else push("liquidity_impact", "Poids de la mise dans la liquidité",
+        15 * clamp(total / liq / 0.10),
+        `${Math.round(total)} $ pour ${Math.round(liq)} $ de liquidité`);
+
+      const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
+      const repetition = 15 * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
+      push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
+
+      const coordinatedWallets = new Set<string>();
+      for (const t of g) {
+        const bucket = Math.floor(Date.parse(t.traded_at) / 600000);
+        const group = coordinated.get(`${condition}|${t.outcome ?? "unknown"}|${bucket}`);
+        for (const other of group ?? []) if (other !== wallet) coordinatedWallets.add(other);
+      }
+      push("coordination", "Activité simultanée entre portefeuilles",
+        10 * clamp(coordinatedWallets.size / 4),
+        coordinatedWallets.size ? `${coordinatedWallets.size} autres portefeuilles sur le même résultat et créneau` : "Aucun autre portefeuille simultané identifié");
+
+      const score = Math.max(0, Math.min(100, Math.round(factors.reduce((a,x)=>a+x.points,0))));
       alerts.push({
         dedupe_key: `${wallet}|${condition}|${g.length === 1 ? "single" : "grouped"}|${g[0].traded_at}`,
         wallet, condition_id: condition, alert_type: g.length === 1 ? "single" : "grouped",
-        score: Math.max(0, Math.min(100, Math.round(factors.reduce((a,x)=>a+x.points,0)))),
-        confidence: missing.length === 0 ? "high" : missing.length <= 1 ? "medium" : "low",
+        score, confidence: missing.length === 0 ? "high" : missing.length <= 1 ? "medium" : "low",
         factors: factors.sort((a,b)=>b.points-a.points), missing_data: missing,
         trade_ids: g.map(t=>t.trade_id), total_usd: Math.round(total*100)/100,
         price_min: minPrice, first_trade_at: g[0].traded_at, last_trade_at: g[g.length-1].traded_at,
@@ -234,7 +305,36 @@ Deno.serve(async (req: Request) => {
         if (error) errors.push(`Sauvegarde transactions: ${error.message}`); else inserted = data?.length ?? 0;
       }
       const liquidity = Object.fromEntries(markets.map(m => [m.condition_id, m.liquidity]));
-      const alerts = buildAlerts(unique, settings, liquidity);
+      const wallets = [...new Set(unique.filter(t => t.side === "BUY").map(t => t.wallet))];
+      const walletContext: Record<string, WalletContext> = {};
+      if (wallets.length) {
+        const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
+        const [{ data: walletRows, error: walletError }, { data: historyRows, error: historyError }] = await Promise.all([
+          db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", wallets),
+          db.from("trades").select("wallet,usd_amount").in("wallet", wallets).gte("traded_at", since30d).limit(5000),
+        ]);
+        if (walletError) errors.push(`Données portefeuilles: ${walletError.message}`);
+        if (historyError) errors.push(`Historique portefeuilles: ${historyError.message}`);
+        const history = new Map<string, number[]>();
+        for (const row of historyRows ?? []) {
+          if (!history.has(row.wallet)) history.set(row.wallet, []);
+          history.get(row.wallet)!.push(Number(row.usd_amount) || 0);
+        }
+        const meta = new Map((walletRows ?? []).map(row => [row.address, row]));
+        for (const wallet of wallets) {
+          const row = meta.get(wallet);
+          const seen = row?.first_platform_activity_at ?? row?.first_seen_at ?? row?.created_at_verified;
+          const ageDays = seen ? Math.max(0, (Date.now() - Date.parse(seen)) / 86400000) : null;
+          const values = history.get(wallet) ?? [];
+          walletContext[wallet] = {
+            ageDays,
+            avgTradeUsd30d: values.length ? values.reduce((a,b)=>a+b,0) / values.length : null,
+            tradeCount30d: values.length,
+            historyComplete: !historyError && values.length < 5000,
+          };
+        }
+      }
+      const alerts = buildAlerts(unique, settings, liquidity, walletContext);
       for (let i=0; i<alerts.length; i+=100) {
         const rows = alerts.slice(i,i+100).map(a => ({ ...a, market_id: markets.find(m => m.condition_id === a.condition_id)?.id ?? "" }));
         const { data, error } = await db.from("alerts").upsert(rows, { onConflict: "dedupe_key" }).select("id");
