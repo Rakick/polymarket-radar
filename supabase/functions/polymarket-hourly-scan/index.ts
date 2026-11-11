@@ -144,7 +144,8 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
   // Cross-wallet activity is measured only among trades actually fetched in this scan batch.
   const coordinated = new Map<string, Set<string>>();
   for (const t of trades) {
-    if (t.side !== "BUY") continue;
+    const minStake = minimumForPrice(t.price);
+    if (t.side !== "BUY" || minStake === null || t.usd_amount < minStake) continue;
     const bucket = Math.floor(Date.parse(t.traded_at) / 600000);
     const key = `${t.condition_id}|${t.outcome ?? "unknown"}|${bucket}`;
     if (!coordinated.has(key)) coordinated.set(key, new Set());
@@ -216,8 +217,10 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         outcomeAmounts.set(outcome, (outcomeAmounts.get(outcome) ?? 0) + trade.usd_amount);
       }
       const dominantShare = total > 0 ? Math.max(...outcomeAmounts.values()) / total : 0;
-      push("concentration", "Concentration sur un même résultat", 8 * clamp((dominantShare - 0.5) / 0.5),
-        `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
+      if (g.length > 1) {
+        push("concentration", "Concentration sur un même résultat", 8 * clamp((dominantShare - 0.5) / 0.5),
+          `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
+      }
       const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
       const repetition = 7 * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
       push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
