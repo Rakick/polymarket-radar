@@ -331,14 +331,21 @@ Deno.serve(async (req: Request) => {
       const walletContext: Record<string, WalletContext> = {};
       if (wallets.length) {
         const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
-        const [{ data: walletRows, error: walletError }, { data: historyRows, error: historyError }] = await Promise.all([
-          db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", wallets),
-          db.from("trades").select("wallet,usd_amount").in("wallet", wallets).gte("traded_at", since30d).limit(5000),
-        ]);
-        if (walletError) errors.push(`Données portefeuilles: ${walletError.message}`);
-        if (historyError) errors.push(`Historique portefeuilles: ${historyError.message}`);
+        const walletRows: any[] = [];
+        const historyRows: any[] = [];
+        for (let i = 0; i < wallets.length; i += 100) {
+          const batch = wallets.slice(i, i + 100);
+          const [{ data: walletBatch, error: walletError }, { data: historyBatch, error: historyError }] = await Promise.all([
+            db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", batch),
+            db.from("trades").select("wallet,usd_amount").in("wallet", batch).gte("traded_at", since30d).limit(500),
+          ]);
+          if (walletError) errors.push(`Données portefeuilles: ${walletError.message}`);
+          else walletRows.push(...(walletBatch ?? []));
+          if (historyError) errors.push(`Historique portefeuilles: ${historyError.message}`);
+          else historyRows.push(...(historyBatch ?? []));
+        }
         const history = new Map<string, number[]>();
-        for (const row of historyRows ?? []) {
+        for (const row of historyRows) {
           if (!history.has(row.wallet)) history.set(row.wallet, []);
           history.get(row.wallet)!.push(Number(row.usd_amount) || 0);
         }
