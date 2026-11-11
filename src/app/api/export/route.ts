@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(r:NextRequest){
   if(!await hasAuthenticatedUser(r)) return NextResponse.json({error:"unauthorized"},{status:401});
-  const{data,error}=await adminClient().from("alerts").select("*").limit(10000);
+  const{data,error}=await adminClient().from("alerts").select("*").gte("score", 60).limit(10000);
   if(error) return NextResponse.json({error:error.message},{status:500});
   if(r.nextUrl.searchParams.get("format")==="json") return NextResponse.json(data??[]);
   const rows=data??[];
