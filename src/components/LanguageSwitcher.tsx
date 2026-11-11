@@ -1,0 +1,1 @@
+"use client";import type {Lang} from "@/lib/i18n";export default function LanguageSwitcher({lang,onChange}:{lang:Lang;onChange:(l:Lang)=>void}){return <div><button onClick={()=>onChange("fr")}>FR</button><button onClick={()=>onChange("en")}>EN</button></div>}

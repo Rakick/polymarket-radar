@@ -1,0 +1,1 @@
+import {NextRequest,NextResponse} from "next/server";import {getSettings,saveSettings} from "@/lib/settings";export async function GET(){return NextResponse.json(await getSettings())}export async function PUT(r:NextRequest){const s=await r.json();await saveSettings(s);return NextResponse.json(s)}

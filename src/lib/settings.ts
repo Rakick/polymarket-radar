@@ -1,0 +1,3 @@
+import {adminClient} from "./supabase"; import {DEFAULT_SETTINGS,Settings} from "./types";
+export async function getSettings():Promise<Settings>{const {data,error}=await adminClient().from("app_settings").select("data").eq("id",1).single();if(error||!data)return {...DEFAULT_SETTINGS};const d=data.data as Partial<Settings>;return {...DEFAULT_SETTINGS,...d,weights:{...DEFAULT_SETTINGS.weights,...(d.weights??{})}};}
+export async function saveSettings(s:Settings){const {error}=await adminClient().from("app_settings").upsert({id:1,data:s,updated_at:new Date().toISOString()});if(error)throw new Error(`Sauvegarde des parametres impossible : ${error.message}`);}

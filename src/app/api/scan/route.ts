@@ -1,0 +1,1 @@
+import {NextResponse} from "next/server";import {runScan} from "@/lib/scan";export const maxDuration=300;export async function POST(){try{return NextResponse.json(await runScan())}catch(e){return NextResponse.json({error:(e as Error).message},{status:500})}}

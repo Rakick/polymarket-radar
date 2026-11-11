@@ -1,0 +1,1 @@
+"use client";export interface AlertRow{ id:string; wallet:string; score:number; total_usd:number; market_question:string; }export default function AlertsTable({alerts}:{alerts:AlertRow[]}){return <table className="w-full"><tbody>{alerts.map(a=><tr key={a.id}><td>{a.wallet}</td><td>{a.market_question}</td><td>{a.score}</td></tr>)}</tbody></table>}

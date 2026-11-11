@@ -1,0 +1,7 @@
+export type Side = "BUY" | "SELL";
+export interface Trade { trade_id:string; transaction_hash:string; wallet:string; pseudonym:string|null; market_id:string; condition_id:string; token_id:string|null; side:Side; outcome:string|null; price:number; size:number; usd_amount:number; traded_at:string; }
+export interface Factor { code:string; label_en:string; label_fr:string; points:number; detail:string; }
+export interface Alert { dedupe_key:string; wallet:string; market_id:string; condition_id:string; alert_type:"single"|"grouped"; score:number; confidence:"high"|"medium"|"low"; factors:Factor[]; missing_data:string[]; trade_ids:string[]; total_usd:number; price_min:number|null; outcome:string|null; first_trade_at:string; last_trade_at:string; }
+export interface Weights { amount:number; low_price:number; new_account:number; concentration:number; burst:number; position_share:number; low_liquidity:number; }
+export interface Settings { min_usd:number; max_price:number; max_price_inclusive:boolean; account_age_days:number; group_window_minutes:number; categories:string[]; scan_overlap_seconds:number; retention_months:number; weights:Weights; }
+export const DEFAULT_SETTINGS:Settings={min_usd:10000,max_price:.2,max_price_inclusive:true,account_age_days:7,group_window_minutes:60,categories:["politics"],scan_overlap_seconds:300,retention_months:12,weights:{amount:25,low_price:20,new_account:15,concentration:15,burst:10,position_share:10,low_liquidity:5}};
