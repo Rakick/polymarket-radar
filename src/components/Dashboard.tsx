@@ -33,6 +33,7 @@ export default function Dashboard() {
   const [updatedAt, setUpdatedAt] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("amount_desc");
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const loadAlerts = useCallback(async (quiet = false) => {
@@ -66,7 +67,7 @@ export default function Dashboard() {
 
   const visibleAlerts = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return alerts.filter((a) => {
+    const filtered = alerts.filter((a) => {
       const matchesQuery = !needle || [
         a.wallet, a.market?.question, a.condition_id, ...(a.factors ?? []).map((f) => f.label_fr),
       ].some((v) => String(v ?? "").toLowerCase().includes(needle));
@@ -77,7 +78,15 @@ export default function Dashboard() {
         || (filter === "grouped" && a.alert_type === "grouped");
       return matchesQuery && matchesFilter;
     });
-  }, [alerts, query, filter]);
+    return filtered.sort((a, b) => {
+      switch (sortBy) {
+        case "amount_asc": return Number(a.total_usd || 0) - Number(b.total_usd || 0);
+        case "score_desc": return Number(b.score || 0) - Number(a.score || 0);
+        case "score_asc": return Number(a.score || 0) - Number(b.score || 0);
+        default: return Number(b.total_usd || 0) - Number(a.total_usd || 0);
+      }
+    });
+  }, [alerts, query, filter, sortBy]);
 
   const highConfidence = alerts.filter((a) => a.confidence === "high").length;
   const totalVolume = alerts.reduce((sum, a) => sum + Number(a.total_usd || 0), 0);
@@ -114,10 +123,13 @@ export default function Dashboard() {
 
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
-            <div className="filter-group">
-              {[["all","Toutes"],["high","Confiance élevée"],["medium","Moyenne"],["low","Faible"],["grouped","Groupées"]].map(([key,label]) =>
-                <button key={key} className={filter === key ? "filter-chip selected" : "filter-chip"} onClick={() => setFilter(key)}>{label}</button>
-              )}
+            <div className="toolbar-controls">
+              <div className="filter-group">
+                {[["all","Toutes"],["high","Confiance élevée"],["medium","Moyenne"],["low","Faible"],["grouped","Groupées"]].map(([key,label]) =>
+                  <button key={key} className={filter === key ? "filter-chip selected" : "filter-chip"} onClick={() => setFilter(key)}>{label}</button>
+                )}
+              </div>
+              <label className="sort-control"><span>Trier par</span><select value={sortBy} onChange={(e) => setSortBy(e.target.value)}><option value="amount_desc">Montant : décroissant</option><option value="amount_asc">Montant : croissant</option><option value="score_desc">Score : décroissant</option><option value="score_asc">Score : croissant</option></select></label>
             </div>
           </div>
 
@@ -142,7 +154,7 @@ export default function Dashboard() {
 
                 {isOpen && <div className="alert-details">
                   <div className="detail-grid">
-                    <div className="detail-block"><span className="detail-label">PORTEFEUILLE</span><strong className="mono">{shortWallet(alert.wallet)}</strong><button className="text-action" onClick={() => navigator.clipboard?.writeText(alert.wallet)}>Copier l’adresse ↗</button></div>
+                    <div className="detail-block"><span className="detail-label">PORTEFEUILLE</span><strong className="mono">{shortWallet(alert.wallet)}</strong><div className="wallet-actions"><button className="text-action" onClick={() => navigator.clipboard?.writeText(alert.wallet)}>Copier l’adresse</button><a className="text-action" href={`https://polymarket.com/profile/${encodeURIComponent(alert.wallet)}`} target="_blank" rel="noreferrer">Voir le profil Polymarket ↗</a></div></div>
                     <div className="detail-block"><span className="detail-label">PRIX MINIMUM OBSERVÉ</span><strong>{alert.price_min == null ? "—" : `${(Number(alert.price_min) * 100).toFixed(2)} %`}</strong></div>
                     <div className="detail-block"><span className="detail-label">PREMIÈRE TRANSACTION</span><strong>{date(alert.first_trade_at)}</strong></div>
                     <div className="detail-block"><span className="detail-label">DERNIÈRE TRANSACTION</span><strong>{date(alert.last_trade_at)}</strong></div>
