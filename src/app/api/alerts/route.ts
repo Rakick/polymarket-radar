@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
     const { data: alerts, error } = await db
       .from("alerts")
       .select("*")
+      .gte("score", 60)
       .order("created_at", { ascending: false })
       .limit(500);
 
