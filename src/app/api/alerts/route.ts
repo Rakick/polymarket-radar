@@ -35,8 +35,8 @@ export async function GET(request: NextRequest) {
     if (marketResult.error) throw marketResult.error;
     if (tradeResult.error) throw tradeResult.error;
 
-    const markets = new Map((marketResult.data ?? []).map((m) => [m.id, m]));
-    const trades = new Map((tradeResult.data ?? []).map((t) => [t.trade_id, t]));
+    const markets = new Map<string, any>((marketResult.data ?? []).map((m): [string, any] => [m.id, m]));
+    const trades = new Map<string, any>((tradeResult.data ?? []).map((t): [string, any] => [t.trade_id, t]));
 
     return NextResponse.json({
       alerts: (alerts ?? []).map((alert) => ({
