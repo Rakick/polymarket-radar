@@ -333,8 +333,8 @@ Deno.serve(async (req: Request) => {
         const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
         const walletRows: any[] = [];
         const historyRows: any[] = [];
-        for (let i = 0; i < wallets.length; i += 100) {
-          const batch = wallets.slice(i, i + 100);
+        for (let i = 0; i < wallets.length; i += 10) {
+          const batch = wallets.slice(i, i + 10);
           const [{ data: walletBatch, error: walletError }, { data: historyBatch, error: historyError }] = await Promise.all([
             db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", batch),
             db.from("trades").select("wallet,usd_amount").in("wallet", batch).gte("traded_at", since30d).limit(500),
