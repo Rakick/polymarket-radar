@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { useState } from "react";
+import type { FormEvent } from "react";
 import { browserClient } from "@/lib/supabase";
 
 export default function LoginPage() {
