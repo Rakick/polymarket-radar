@@ -122,7 +122,7 @@ async function getTrades(market: any, start: number, end: number) {
   return { trades: out, truncated: true };
 }
 type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number };
-const MIN_ALERT_SCORE = 60;
+const MIN_ALERT_SCORE = 50;
 function minimumForPrice(price: number): number | null {
   if (price <= 0 || price > 0.2) return null;
   if (price < 0.05) return 1000;
