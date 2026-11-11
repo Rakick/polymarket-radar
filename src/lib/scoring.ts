@@ -9,9 +9,9 @@ export interface ScoreContext {
 const clamp=(v:number,min=0,max=1)=>Math.max(min,Math.min(max,v));
 export function minimumStakeForPrice(price:number):number|null {
   if (!Number.isFinite(price) || price<=0 || price>.2) return null;
-  if (price<.05) return 500;
-  if (price<.10) return 1000;
-  return 5000;
+  if (price<.05) return 1000;
+  if (price<.10) return 2500;
+  return 7500;
 }
 export function computeScore(ctx:ScoreContext,s:Settings) {
   const trades=ctx.trades.filter(t=>t.side==="BUY");
