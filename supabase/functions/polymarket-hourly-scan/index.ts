@@ -95,7 +95,7 @@ async function getMarkets(categories: string[]) {
 async function getTrades(market: any, start: number, end: number) {
   const out: Trade[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 1; page++) {
+  for (let page = 0; page < 2; page++) {
     const q = new URLSearchParams({ condition: market.condition_id, start: String(Math.max(0, start)), end: String(end), limit: "500", taker_only: "true" });
     if (cursor) q.set("cursor", cursor);
     let response: any;
@@ -209,7 +209,7 @@ Deno.serve(async (req: Request) => {
       const { data: checkpoint } = await db.from("checkpoints").select("value").eq("key", "trades_checkpoint").maybeSingle();
       batchStart = Number(checkpoint?.value ?? 0);
       if (!Number.isFinite(batchStart) || batchStart < 0 || batchStart >= targetMarkets) batchStart = 0;
-      const markets = catalogue.slice(batchStart, batchStart + 10);
+      const markets = catalogue.slice(batchStart, batchStart + 5);
       const nextOffset = (batchStart + markets.length) % targetMarkets;
       const { error: checkpointError } = await db.from("checkpoints").upsert({
         key: "trades_checkpoint", value: nextOffset, updated_at: new Date().toISOString()
@@ -223,7 +223,7 @@ Deno.serve(async (req: Request) => {
           const result = await getTrades(market, start, end);
           all.push(...result.trades);
           if (result.error) errors.push(`${market.slug}: ${result.error}`);
-          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après 1 page`);
+          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après 2 pages`);
           if (!result.error) scanned++;
         }
       });
@@ -243,7 +243,7 @@ Deno.serve(async (req: Request) => {
     }
   } catch (e) { errors.push((e as Error).message); }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
-  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 10, total_markets: targetMarkets } };
+  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets } };
   const { error: finishError } = await db.from("scans").update({
     finished_at: new Date().toISOString(), ...result,
   }).eq("id", scan.id);
