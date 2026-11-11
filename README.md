@@ -13,3 +13,4 @@ npm run dev
 ```
 
 Les API Polymarket utilisées sont publiques. Configurez Supabase et exécutez `supabase/schema.sql`.
+.
