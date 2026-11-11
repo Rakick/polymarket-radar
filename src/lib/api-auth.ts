@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 import { adminClient } from "@/lib/supabase";
 
 /** Validate a Supabase access token against Auth; never trust client-supplied user data. */
@@ -27,5 +28,5 @@ export function hasValidCronSecret(request: NextRequest): boolean {
   const expected = Buffer.from(configured);
   if (supplied.length !== expected.length) return false;
   // Compare bytes without an early-exit string comparison.
-  return require("node:crypto").timingSafeEqual(supplied, expected);
+  return timingSafeEqual(supplied, expected);
 }
