@@ -11,10 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          # Node 22 provides the native WebSocket implementation required by Supabase Realtime.
+          node-version: 22
       # The repository currently has no committed lockfile. Generate one before
       # npm ci so the workflow does not fail immediately on a clean checkout.
       - run: npm install --package-lock-only
