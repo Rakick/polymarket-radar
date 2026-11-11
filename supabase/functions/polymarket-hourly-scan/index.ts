@@ -314,11 +314,20 @@ Deno.serve(async (req: Request) => {
       await Promise.all(workers);
       const unique = [...new Map(all.map(t => [t.trade_id,t])).values()]; fetched = unique.length;
       if (unique.length) {
-        const { data, error } = await db.from("trades").upsert(unique, { onConflict: "trade_id", ignoreDuplicates: true }).select("trade_id");
-        if (error) errors.push(`Sauvegarde transactions: ${error.message}`); else inserted = data?.length ?? 0;
+        for (let i = 0; i < unique.length; i += 250) {
+          const { data, error } = await db.from("trades")
+            .upsert(unique.slice(i, i + 250), { onConflict: "trade_id", ignoreDuplicates: true })
+            .select("trade_id");
+          if (error) errors.push(`Sauvegarde transactions lot ${Math.floor(i / 250) + 1}: ${error.message}`);
+          else inserted += data?.length ?? 0;
+        }
       }
       const liquidity = Object.fromEntries(markets.map(m => [m.condition_id, m.liquidity]));
-      const wallets = [...new Set(unique.filter(t => t.side === "BUY").map(t => t.wallet))];
+      const wallets = [...new Set(unique.filter(t => {
+        if (t.side !== "BUY") return false;
+        const threshold = minimumForPrice(t.price);
+        return threshold !== null && t.usd_amount >= threshold;
+      }).map(t => t.wallet))];
       const walletContext: Record<string, WalletContext> = {};
       if (wallets.length) {
         const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
