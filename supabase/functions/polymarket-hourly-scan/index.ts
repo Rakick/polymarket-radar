@@ -187,15 +187,21 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         `${Math.round(total)} $ réels · ${Math.round(adjustedAmount)} $ équivalents (cote moyenne ${(weightedPrice*100).toFixed(1)} c)`);
 
       const ctx = walletContext[wallet];
+      let walletPoints = 0;
       if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
-      else if (ctx.ageDays <= settings.account_age_days) push("wallet_age", "Portefeuille récent", 20 * (1 - clamp(ctx.ageDays / settings.account_age_days)), `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
-
+      else if (ctx.ageDays <= settings.account_age_days) {
+        const agePoints = 8 * (1 - clamp(ctx.ageDays / settings.account_age_days));
+        walletPoints += agePoints;
+        push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
+      }
       if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3 || !ctx.historyComplete) {
         missing.push("wallet_baseline");
       } else {
         const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
+        const anomalyPoints = 12 * clamp(Math.log10(Math.max(1, ratio)) / 2);
+        walletPoints += anomalyPoints;
         push("wallet_anomaly", "Mise inhabituelle pour ce portefeuille",
-          20 * clamp(Math.log10(Math.max(1, ratio)) / 2),
+          anomalyPoints,
           `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction en moyenne sur 30 jours`);
       }
 
@@ -205,8 +211,16 @@ function buildAlerts(trades: Trade[], settings: Settings, liquidity: Record<stri
         15 * clamp(total / liq / 0.10),
         `${Math.round(total)} $ pour ${Math.round(liq)} $ de liquidité`);
 
+      const outcomeAmounts = new Map<string, number>();
+      for (const trade of g) {
+        const outcome = trade.outcome ?? "unknown";
+        outcomeAmounts.set(outcome, (outcomeAmounts.get(outcome) ?? 0) + trade.usd_amount);
+      }
+      const dominantShare = total > 0 ? Math.max(...outcomeAmounts.values()) / total : 0;
+      push("concentration", "Concentration sur un même résultat", 8 * clamp((dominantShare - 0.5) / 0.5),
+        `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
       const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
-      const repetition = 15 * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
+      const repetition = 7 * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
       push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
 
       const coordinatedWallets = new Set<string>();
@@ -323,7 +337,7 @@ Deno.serve(async (req: Request) => {
         const meta = new Map((walletRows ?? []).map(row => [row.address, row]));
         for (const wallet of wallets) {
           const row = meta.get(wallet);
-          const seen = row?.first_platform_activity_at ?? row?.first_seen_at ?? row?.created_at_verified;
+          const seen = row?.first_platform_activity_at ?? row?.created_at_verified;
           const ageDays = seen ? Math.max(0, (Date.now() - Date.parse(seen)) / 86400000) : null;
           const values = history.get(wallet) ?? [];
           walletContext[wallet] = {
