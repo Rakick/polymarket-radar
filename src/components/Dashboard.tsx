@@ -22,7 +22,7 @@ const shortWallet = (value: string) => value ? value.slice(0, 8) + "…" + value
 const confidenceLabel = (value: string) => value === "high" ? "Élevée" : value === "medium" ? "Moyenne" : "Faible";
 const missingLabel: Record<string, string> = {
   wallet_age: "Ancienneté vérifiée du portefeuille", wallet_baseline: "Historique de transactions du portefeuille",
-  market_liquidity: "Liquidité du marché",
+  wallet_baseline_partial: "Historique partiel du portefeuille", market_liquidity: "Liquidité du marché",
 };
 
 export default function Dashboard() {
