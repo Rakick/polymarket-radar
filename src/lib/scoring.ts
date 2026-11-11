@@ -54,7 +54,7 @@ export function computeScore(ctx:ScoreContext,s:Settings) {
     push("concentration","Concentration sur un même résultat","Concentration on one outcome",w.concentration*clamp((dominantShare-.5)/.5),`${Math.round(dominantShare*100)} % de la mise sur le résultat dominant`);
   }
   const span=Math.max(1,(Date.parse(trades[trades.length-1].traded_at)-Date.parse(trades[0].traded_at))/60000);
-  push("repetition","Achats répétés et rapprochés","Repeated close purchases",w.repetition*clamp((trades.length-1)/5)*(1-clamp(span/Math.max(1,s.group_window_minutes)),`${trades.length} achats regroupés sur ${span.toFixed(1)} minutes`);
+  push("repetition","Achats répétés et rapprochés","Repeated close purchases",w.repetition*clamp((trades.length-1)/5)*(1-clamp(span/Math.max(1,s.group_window_minutes))),`${trades.length} achats regroupés sur ${span.toFixed(1)} minutes`);
   if(ctx.coordinatedWalletCount!==undefined) push("coordination","Activité simultanée entre portefeuilles","Coordinated wallet activity",w.coordination*clamp(ctx.coordinatedWalletCount/4),`${ctx.coordinatedWalletCount} autres portefeuilles concernés`);
   else missing.push("coordination_data");
   const score=Math.max(0,Math.min(100,Math.round(factors.reduce((a,x)=>a+x.points,0))));
