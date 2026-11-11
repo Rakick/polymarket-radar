@@ -1,3 +1,51 @@
-import type {Alert,Factor,Settings,Trade,Weights} from "./types";
-export interface ScoreContext{trades:Trade[];walletFirstSeenAt:string|null;walletRecentVolumeUsd:number|null;walletTotalVolumeUsd:number|null;marketLiquidityUsd:number|null;}
-export function computeScore(ctx:ScoreContext,s:Settings){const w:Weights=s.weights,f:Factor[]=[],missing:string[]=[];const total=ctx.trades.reduce((a,t)=>a+t.usd_amount,0),min=Math.min(...ctx.trades.map(t=>t.price)),now=Date.now();const push=(code:string,fr:string,en:string,p:number,d:string)=>{if(p>.01)f.push({code,label_fr:fr,label_en:en,points:Math.round(p*10)/10,detail:d});};if(total>=s.min_usd)push("amount","Montant élevé","High amount",w.amount*Math.min(1,Math.log10(Math.max(1,total/s.min_usd))/2),`${Math.round(total)} USD`);if(min<=s.max_price)push("low_price","Prix de l'issue bas","Low outcome price",w.low_price*(1-Math.min(1,min/s.max_price)),`prix min ≈ ${(min*100).toFixed(1)} %`);if(ctx.walletFirstSeenAt){const age=(now-new Date(ctx.walletFirstSeenAt).getTime())/86400000;if(age<=s.account_age_days)push("new_account","Première activité observée récente","Recent first observed activity",w.new_account*(1-Math.min(1,age/s.account_age_days)),`il y a ${age.toFixed(1)} j`);}else{missing.push("account_age");push("new_account","Âge du compte inconnu","Account age unknown",w.new_account/3,"date inconnue");}if(ctx.walletRecentVolumeUsd&&ctx.walletRecentVolumeUsd>0){const share=Math.min(1,total/ctx.walletRecentVolumeUsd);if(share>=.5)push("concentration","Concentration sur un marché/issue","Concentration on one market/outcome",w.concentration*share,`${Math.round(share*100)} % du volume`);}else missing.push("wallet_recent_volume");if(ctx.trades.length>1)push("burst","Achats répétés rapprochés","Repeated close purchases",w.burst*Math.min(1,(ctx.trades.length-1)/5),`${ctx.trades.length} achats regroupés`);if(ctx.walletTotalVolumeUsd&&ctx.walletTotalVolumeUsd>0){const share=Math.min(1,total/ctx.walletTotalVolumeUsd);if(share>=.5)push("position_share","Position très concentrée","Highly concentrated position",w.position_share*share,`${Math.round(share*100)} % du volume`);}else missing.push("wallet_total_volume");if(ctx.marketLiquidityUsd==null)missing.push("market_liquidity");else if(ctx.marketLiquidityUsd<50000)push("low_liquidity","Liquidité faible","Low liquidity",w.low_liquidity,`${Math.round(ctx.marketLiquidityUsd)} USD`);return {score:Math.max(0,Math.min(100,Math.round(f.reduce((a,x)=>a+x.points,0)))),factors:f.sort((a,b)=>b.points-a.points),confidence:missing.length===0?"high":missing.length<=1?"medium":"low",missing_data:missing} as const;}
+import type {Alert,Factor,Settings,Trade} from "./types";
+export interface ScoreContext {
+  trades:Trade[];
+  walletFirstSeenAt:string|null;
+  walletRecentVolumeUsd:number|null;
+  walletTotalVolumeUsd:number|null;
+  marketLiquidityUsd:number|null;
+  coordinatedWalletCount?:number;
+}
+const clamp=(v:number,min=0,max=1)=>Math.max(min,Math.min(max,v));
+export function minimumStakeForPrice(price:number):number|null {
+  if (!Number.isFinite(price) || price<=0 || price>.2) return null;
+  if (price<.05) return 500;
+  if (price<.10) return 1000;
+  return 5000;
+}
+export function computeScore(ctx:ScoreContext,s:Settings) {
+  const trades=ctx.trades.filter(t=>t.side==="BUY");
+  const total=trades.reduce((a,t)=>a+t.usd_amount,0);
+  const weightedPrice=total>0?trades.reduce((a,t)=>a+t.price*t.usd_amount,0)/total:0;
+  const minimum=minimumStakeForPrice(weightedPrice);
+  const factors:Factor[]=[],missing:string[]=[];
+  const push=(code:string,fr:string,en:string,points:number,detail:string)=>{
+    const rounded=Math.round(points*10)/10;
+    if(rounded>.01) factors.push({code,label_fr:fr,label_en:en,points:rounded,detail});
+  };
+  if(!trades.length || minimum===null || total<minimum) {
+    missing.push("below_detection_threshold");
+    return {score:0,factors,confidence:"low" as const,missing_data:missing};
+  }
+  const oddsMultiplier=clamp(Math.pow(.10/Math.max(weightedPrice,.01),1.35),.5,10);
+  const adjusted=total*oddsMultiplier;
+  push("adjusted_amount","Montant ajusté à la cote","Odds-adjusted amount",40*clamp(Math.log10(Math.max(1,adjusted/500))/1.5),`${Math.round(total)} USD réels · ${Math.round(adjusted)} USD équivalents à ${(weightedPrice*100).toFixed(1)} c`);
+  if(ctx.walletFirstSeenAt) {
+    const ageDays=Math.max(0,(Date.now()-new Date(ctx.walletFirstSeenAt).getTime())/86400000);
+    push("wallet_age","Ancienneté vérifiée du portefeuille","Verified wallet age",8*(1-clamp(ageDays/s.account_age_days)),`Première activité observée il y a ${ageDays.toFixed(1)} jours`);
+  } else missing.push("wallet_age");
+  if(ctx.walletRecentVolumeUsd && ctx.walletRecentVolumeUsd>0) {
+    const average=ctx.walletRecentVolumeUsd;
+    push("wallet_anomaly","Mise inhabituelle pour ce portefeuille","Unusual wallet stake",12*clamp(Math.log10(Math.max(1,total/average))/2),`${Math.round(total)} USD comparés à ${Math.round(average)} USD de référence observée`);
+  } else missing.push("wallet_baseline");
+  if(ctx.marketLiquidityUsd && ctx.marketLiquidityUsd>0) {
+    push("liquidity_impact","Poids de la mise dans la liquidité","Stake relative to liquidity",15*clamp(total/ctx.marketLiquidityUsd/.1),`${Math.round(total)} USD pour ${Math.round(ctx.marketLiquidityUsd)} USD de liquidité`);
+  } else missing.push("market_liquidity");
+  const span=Math.max(1,(Date.parse(trades[trades.length-1].traded_at)-Date.parse(trades[0].traded_at))/60000);
+  push("repetition","Achats répétés et rapprochés","Repeated close purchases",15*clamp((trades.length-1)/5)*(1-clamp(span/Math.max(1,s.group_window_minutes))),`${trades.length} achats regroupés sur ${span.toFixed(1)} minutes`);
+  if(ctx.coordinatedWalletCount!==undefined) push("coordination","Activité simultanée entre portefeuilles","Coordinated wallet activity",10*clamp(ctx.coordinatedWalletCount/4),`${ctx.coordinatedWalletCount} autres portefeuilles concernés`);
+  else missing.push("coordination_data");
+  const score=Math.max(0,Math.min(100,Math.round(factors.reduce((a,x)=>a+x.points,0))));
+  return {score,factors:factors.sort((a,b)=>b.points-a.points),confidence:missing.length===0?"high":missing.length<=1?"medium":"low",missing_data:missing} as const;
+}
