@@ -199,7 +199,7 @@ function buildAlerts(trades: Trade[], settings: Settings, walletContext: Record<
       if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
       else if (ctx.ageDays <= settings.account_age_days) {
         const agePoints = (settings.weights.wallet_age ?? 12) * (1 - clamp(ctx.ageDays / settings.account_age_days));
-        push("wallet_age", "Portefeuille récent", agePoints, `Compte observé depuis ${Math.round(ctx.ageDays)} jours`);
+        push("wallet_age", "Compte Polymarket récent", agePoints, `Compte créé sur Polymarket il y a ${Math.round(ctx.ageDays)} jours`);
       }
       if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3) {
         missing.push("wallet_baseline");
