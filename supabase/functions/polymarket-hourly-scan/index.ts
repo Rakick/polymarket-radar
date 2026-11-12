@@ -104,15 +104,19 @@ async function getTrades(market: any, start: number, end: number) {
     catch (e) { return { trades: out, error: (e as Error).message, truncated: true }; }
     for (const r of response.data ?? []) {
       if (!r.transaction_hash || !r.proxy_wallet || !r.condition_id) continue;
+      const timestamp = Number(r.timestamp);
+      // The Data API may return out-of-window records despite start/end parameters.
+      // Enforce the requested scan window locally so historical pages cannot refill raw storage.
+      if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
       const price = Number(r.price), size = Number(r.size);
       if (!Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0) continue;
       const side = String(r.side).toUpperCase() === "BUY" ? "BUY" : "SELL";
-      const idInput = [r.transaction_hash, r.proxy_wallet, r.token_id ?? "", r.side, r.size, r.price, r.timestamp].join("|");
+      const idInput = [r.transaction_hash, r.proxy_wallet, r.token_id ?? "", r.side, r.size, r.price, timestamp].join("|");
       out.push({
         trade_id: await hash(idInput), transaction_hash: r.transaction_hash, wallet: String(r.proxy_wallet).toLowerCase(),
         pseudonym: r.pseudonym || r.name || null, market_id: market.id, condition_id: r.condition_id,
         token_id: r.token_id ?? null, side, outcome: r.outcome ?? null, price, size,
-        usd_amount: Math.round(price * size * 100) / 100, traded_at: new Date(Number(r.timestamp) * 1000).toISOString(),
+        usd_amount: Math.round(price * size * 100) / 100, traded_at: new Date(timestamp * 1000).toISOString(),
       });
     }
     const hasMore = response.pagination?.has_more === true;
