@@ -261,8 +261,8 @@ Deno.serve(async (req: Request) => {
 
   await db.from("scans").update({
     status: "failed", finished_at: new Date().toISOString(),
-    errors: ["Exécution interrompue lors d'un lancement précédent (limite de ressources)."]
-  }).eq("status", "running").lt("started_at", new Date(Date.now() - 10 * 60 * 1000).toISOString());
+    errors: ["Exécution interrompue après expiration du verrou de scan (5 minutes)."]
+  }).eq("status", "running").lt("started_at", new Date(Date.now() - 5 * 60 * 1000).toISOString());
 
   const { data: settingRow, error: settingsError } = await db.from("app_settings").select("data").eq("id", 1).single();
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
@@ -272,6 +272,9 @@ Deno.serve(async (req: Request) => {
   const { data: scan, error: startError } = await db.from("scans").insert({
     started_at: new Date().toISOString(), status: "running", window_start: start, window_end: end,
   }).select("id").single();
+  if (startError?.code === "23505") {
+    return new Response(JSON.stringify({ status: "skipped", reason: "Un scan est déjà en cours." }), { status: 200, headers: cors });
+  }
   if (startError || !scan) return new Response(JSON.stringify({ error: startError?.message ?? "Scan record missing" }), { status: 500, headers: cors });
 
   const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0;
