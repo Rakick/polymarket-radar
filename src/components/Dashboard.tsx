@@ -66,6 +66,8 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, [loadAlerts]);
 
+  const v2Scores = useMemo(() => computeV2Scores(alerts), [alerts]);
+
   const visibleAlerts = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const filtered = alerts.filter((a) => {
@@ -91,7 +93,6 @@ export default function Dashboard() {
     });
   }, [alerts, query, filter, sortBy, v2Scores]);
 
-  const v2Scores = useMemo(() => computeV2Scores(alerts), [alerts]);
   const highConfidence = alerts.filter((a) => a.confidence === "high").length;
   const totalVolume = alerts.reduce((sum, a) => sum + Number(a.total_usd || 0), 0);
   const uniqueWallets = new Set(alerts.map((a) => a.wallet)).size;
