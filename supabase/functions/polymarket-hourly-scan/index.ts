@@ -96,7 +96,7 @@ async function getMarkets(categories: string[]) {
 async function getTrades(market: any, start: number, end: number) {
   const out: Trade[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 5; page++) {
+  for (let page = 0; page < 10; page++) {
     const q = new URLSearchParams({ condition: market.condition_id, start: String(Math.max(0, start)), end: String(end), limit: "500", taker_only: "true" });
     if (cursor) q.set("cursor", cursor);
     let response: any;
@@ -173,7 +173,7 @@ function buildV2Signals(trades: Trade[], settings: Settings) {
     const previous=group[group.length-1];
     const sameGroup=previous && previous.wallet===trade.wallet && previous.condition_id===trade.condition_id
       && previous.side===trade.side && (previous.outcome ?? "")===(trade.outcome ?? "")
-      && Date.parse(trade.traded_at)-Date.parse(group[0].traded_at)<=windowMs;
+      && Date.parse(trade.traded_at)-Date.parse(previous.traded_at)<=windowMs;
     if (!sameGroup) flush();
     group.push(trade);
   }
@@ -364,7 +364,7 @@ Deno.serve(async (req: Request) => {
           const result = await getTrades(market, start, end);
           all.push(...result.trades);
           if (result.error) errors.push(`${market.slug}: ${result.error}`);
-          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après 5 pages`);
+          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après 10 pages`);
           if (!result.error) scanned++;
         }
       });
