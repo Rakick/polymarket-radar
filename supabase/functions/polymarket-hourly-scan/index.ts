@@ -93,15 +93,18 @@ async function getMarkets(categories: string[]) {
   }
   return { markets, errors };
 }
+// Max pages of trades per market per scan (500 trades per page).
+const MAX_TRADE_PAGES = 10;
 async function getTrades(market: any, start: number, end: number) {
   const out: Trade[] = [];
   let cursor: string | undefined;
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; page < MAX_TRADE_PAGES; page++) {
     const q = new URLSearchParams({ condition: market.condition_id, start: String(Math.max(0, start)), end: String(end), limit: "500", taker_only: "true" });
     if (cursor) q.set("cursor", cursor);
     let response: any;
     try { response = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${q}`); }
     catch (e) { return { trades: out, error: (e as Error).message, truncated: true }; }
+    let inWindow = 0;
     for (const r of response.data ?? []) {
       if (!r.transaction_hash || !r.proxy_wallet || !r.condition_id) continue;
       const timestamp = Number(r.timestamp);
@@ -118,6 +121,12 @@ async function getTrades(market: any, start: number, end: number) {
         token_id: r.token_id ?? null, side, outcome: r.outcome ?? null, price, size,
         usd_amount: Math.round(price * size * 100) / 100, traded_at: new Date(timestamp * 1000).toISOString(),
       });
+      inWindow++;
+    }
+    if (inWindow === 0) {
+      // The Data API ignores the start parameter and returns full history, newest first.
+      // A page with no in-window trades means we have gone past the scan window: stop here.
+      return { trades: out, truncated: false };
     }
     const hasMore = response.pagination?.has_more === true;
     cursor = response.pagination?.next_cursor ?? undefined;
@@ -408,7 +417,7 @@ Deno.serve(async (req: Request) => {
           const result = await getTrades(market, start, end);
           all.push(...result.trades);
           if (result.error) errors.push(`${market.slug}: ${result.error}`);
-          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après 10 pages`);
+          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après ${MAX_TRADE_PAGES} pages`);
           if (!result.error) scanned++;
         }
       });
@@ -510,4 +519,3 @@ Deno.serve(async (req: Request) => {
   if (finishError) return new Response(JSON.stringify({ ...result, history_error: finishError.message }), { status: 500, headers: cors });
   return new Response(JSON.stringify(result), { status: status === "failed" ? 500 : 200, headers: cors });
 });
-function gammaMarketCountPlaceholder() { return true; }
