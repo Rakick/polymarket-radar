@@ -164,19 +164,19 @@ button,input,select{font:inherit}button{cursor:pointer}
 
 /* Resolution outcomes and score calibration */
 .outcome-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 18px}
-.outcome-stat-card{display:flex;flex-direction:column;gap:8px;padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--card)}
+.outcome-stat-card{display:flex;flex-direction:column;gap:8px;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
 .outcome-stat-card span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .outcome-stat-card strong{font-size:28px;line-height:1.1;font-variant-numeric:tabular-nums}
 .outcome-stat-card small{font-size:11px;color:var(--muted)}
-.outcome-calibration,.outcome-history{margin:0 0 20px;padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--card)}
+.outcome-calibration,.outcome-history{margin:0 0 20px;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
 .outcome-calibration h4,.outcome-history h4{margin:0 0 14px;font-size:13px;font-weight:650}
 .outcome-calibration-grid{display:flex;flex-direction:column;gap:8px}
-.outcome-calibration-row{display:grid;grid-template-columns:1fr 1.2fr 1.2fr .6fr;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border);font-size:12px}
+.outcome-calibration-row{display:grid;grid-template-columns:1fr 1.2fr 1.2fr .6fr;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-size:12px}
 .outcome-calibration-row:last-child{border-bottom:0}
 .outcome-calibration-row span{color:var(--muted)}
 .outcome-calibration-row strong{text-align:right;font-variant-numeric:tabular-nums}
 .outcome-history{display:flex;flex-direction:column;gap:0}
-.outcome-history-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--border)}
+.outcome-history-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
 .outcome-history-row:last-child{border-bottom:0}
 .outcome-history-main{display:flex;min-width:0;flex-direction:column;gap:5px}
 .outcome-history-main strong{font-size:12px;line-height:1.4}
