@@ -1,0 +1,2 @@
+select cron.unschedule(jobid) from cron.job where jobname='prune-market-price-snapshots';
+select cron.schedule('prune-market-price-snapshots','17 3 * * *',$$delete from public.market_price_snapshots where captured_at < now() - interval '90 days'$$);
