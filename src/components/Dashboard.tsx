@@ -45,6 +45,24 @@ export default function Dashboard() {
   const [filter, setFilter] = useState("all");
   const [sortBy, setSortBy] = useState("amount_desc");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [activeView, setActiveView] = useState("overview");
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("radar-theme");
+    if (saved === "light" || saved === "dark") setTheme(saved);
+  }, []);
+
+  const changeTheme = () => setTheme((current) => {
+    const next = current === "dark" ? "light" : "dark";
+    window.localStorage.setItem("radar-theme", next);
+    return next;
+  });
+
+  const navigateTo = (view: string) => {
+    setActiveView(view);
+    document.getElementById(view)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const loadAlerts = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true); else setLoading(true);
@@ -105,36 +123,41 @@ export default function Dashboard() {
 
   const highConfidence = alerts.filter((a) => a.confidence === "high").length;
   const totalVolume = alerts.reduce((sum, a) => sum + Number(a.total_usd || 0), 0);
-  const uniqueWallets = new Set(alerts.map((a) => a.wallet)).size;
+  const uniqueWallets = new Set([...alerts.map((a) => a.wallet), ...signalsV2.map((s) => s.wallet)]).size;
+  const averageV2 = signalsV2.length ? Math.round(signalsV2.reduce((sum, signal) => sum + Number(signal.score || 0), 0) / signalsV2.length) : 0;
+  const highV2 = signalsV2.filter((signal) => signal.score >= 75).length;
 
   return (
-    <main className="radar-shell">
+    <main className="radar-shell" data-theme={theme}>
       <aside className="sidebar">
-        <a className="brand" href="#"><span className="brand-mark">R</span><span>POLYMARKET<span className="brand-muted">RADAR</span></span></a>
-        <div className="sidebar-label">ESPACE DE TRAVAIL</div>
-        <a className="nav-item active" href="#alerts"><span>◈</span> Vue d’ensemble</a>
-        <a className="nav-item" href="#alerts"><span>⌁</span> Alertes détectées <b>{alerts.length}</b></a>
+        <a className="brand" href="#overview" onClick={() => setActiveView("overview")}><span className="brand-mark"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".55"/><circle cx="20" cy="20" r="9" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".8"/><path d="M20 20 32 8M20 20l-1 10" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/><circle cx="20" cy="20" r="2.7" fill="currentColor"/></svg></span><span>POLYMARKET<span className="brand-muted">RADAR / INTELLIGENCE</span></span></a>
+        <div className="sidebar-label">WORKSPACE</div>
+        <button className={`nav-item ${activeView === "overview" ? "active" : ""}`} onClick={() => navigateTo("overview")}><span>⌂</span> Vue d’ensemble</button>
+        <button className={`nav-item ${activeView === "v2-signals" ? "active" : ""}`} onClick={() => navigateTo("v2-signals")}><span>◈</span> Intelligence V2 <b>{signalsV2.length}</b></button>
+        <button className={`nav-item ${activeView === "v1-alerts" ? "active" : ""}`} onClick={() => navigateTo("v1-alerts")}><span>⌁</span> Alertes V1 <b>{alerts.length}</b></button>
+        <div className="sidebar-label nav-secondary-label">MONITORING</div>
+        <div className="nav-static"><span>◎</span> Surveillance active</div>
         <div className="sidebar-bottom">
           <div className="system-card"><span className="status-dot" /> <span><strong>Scanner actif</strong><small>Synchronisation automatique</small></span></div>
           <button className="logout-button" onClick={() => browserClient().auth.signOut()}>↗ Déconnexion</button>
         </div>
       </aside>
 
-      <section className="main-panel">
+      <section className="main-panel" id="overview">
         <header className="topbar">
-          <div><span className="eyebrow">SURVEILLANCE DES MARCHÉS</span><h1>Vue d’ensemble</h1><p>Comparez le moteur historique et le nouveau scoring expérimental, sans remplacer les alertes existantes.</p></div>
-          <button className="refresh-button" onClick={() => void loadAlerts(true)} disabled={refreshing}>{refreshing ? "Actualisation…" : "↻ Actualiser"}</button>
+          <div><span className="eyebrow">MARKET INTELLIGENCE / LIVE MONITORING</span><h1>Vue d’ensemble</h1><p>Détection et analyse des activités atypiques sur les marchés prédictifs.</p></div>
+          <div className="topbar-actions"><button className="theme-toggle" onClick={changeTheme} aria-label="Basculer le thème"><span>{theme === "dark" ? "☼" : "◐"}</span>{theme === "dark" ? "Mode clair" : "Mode sombre"}</button><button className="refresh-button" onClick={() => void loadAlerts(true)} disabled={refreshing}>{refreshing ? "Actualisation…" : "↻ Actualiser"}</button></div>
         </header>
 
         <section className="metric-grid">
-          <article className="metric-card"><span className="metric-label">Alertes détectées</span><strong>{loading ? "—" : alerts.length}</strong><small>Sur l’ensemble de l’historique disponible</small><span className="metric-icon">◈</span></article>
-          <article className="metric-card"><span className="metric-label">Portefeuilles concernés</span><strong>{loading ? "—" : uniqueWallets}</strong><small>Adresses distinctes signalées</small><span className="metric-icon">⌘</span></article>
-          <article className="metric-card"><span className="metric-label">Volume associé</span><strong>{loading ? "—" : money(totalVolume)}</strong><small>Somme des montants des alertes</small><span className="metric-icon">$</span></article>
-          <article className="metric-card"><span className="metric-label">Confiance élevée</span><strong>{loading ? "—" : highConfidence}</strong><small>Alertes avec données suffisamment complètes</small><span className="metric-icon">✓</span></article>
+          <article className="metric-card metric-primary"><span className="metric-label">Signaux V2 qualifiés</span><strong>{loading ? "—" : signalsV2.length}</strong><small>Score minimum affiché : 50 / 100</small><span className="metric-icon">◈</span></article>
+          <article className="metric-card"><span className="metric-label">Score V2 moyen</span><strong>{loading ? "—" : `${averageV2}/100`}</strong><small>Sur les signaux actuellement visibles</small><span className="metric-icon">↗</span></article>
+          <article className="metric-card"><span className="metric-label">Portefeuilles suivis</span><strong>{loading ? "—" : uniqueWallets}</strong><small>Adresses distinctes identifiées</small><span className="metric-icon">◎</span></article>
+          <article className="metric-card"><span className="metric-label">Signaux à forte intensité</span><strong>{loading ? "—" : highV2}</strong><small>Score V2 supérieur ou égal à 75</small><span className="metric-icon">✳</span></article>
         </section>
 
-        <section className="alerts-section" id="v2-signals">
-          <div className="section-heading"><div><span className="eyebrow">MOTEUR INDÉPENDANT · V2</span><h2>Nouveaux signaux détectés</h2><p>Achats et ventes sur les marchés surveillés, sans filtre de prix à 20 cents.</p></div><span className="result-count">{signalsV2.length} signal{signalsV2.length > 1 ? "x" : ""}</span></div>
+        <section className="alerts-section v2-main-section" id="v2-signals">
+          <div className="section-heading"><div><span className="eyebrow">PRIMARY ENGINE / SCORING V2</span><h2>Intelligence des signaux</h2><p>Signaux qualifiés sur l’ensemble des régimes de prix, achats et ventes confondus.</p></div><span className="result-count">{signalsV2.length} signal{signalsV2.length > 1 ? "x" : ""}</span></div>
           {!loading && signalsV2.length === 0 && <div className="empty-state"><strong>Aucun signal V2 pour le moment</strong><span>Les signaux apparaîtront après le prochain passage du scanner sur les marchés.</span></div>}
           <div className="alert-list">
             {signalsV2.map((signal) => {
@@ -172,8 +195,8 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <section className="alerts-section" id="alerts">
-          <div className="section-heading"><div><span className="eyebrow">CENTRE DE SIGNALEMENT</span><h2>Alertes récentes</h2><p>Chaque signal est une piste à examiner, pas une preuve de fraude.</p><div className="scoring-legend"><span><b className="legend-old" /> Ancien score : moteur de détection actuel</span><span><b className="legend-new" /> Nouveau score : expérimental, données partielles</span></div></div><span className="result-count">{visibleAlerts.length} résultat{visibleAlerts.length > 1 ? "s" : ""}</span></div>
+        <section className="alerts-section v1-section" id="v1-alerts">
+          <div className="section-heading"><div><span className="eyebrow">LEGACY ENGINE / V1</span><h2>Alertes historiques</h2><p>Moteur historique conservé en complément. Chaque signal reste une piste à examiner, pas une preuve de fraude.</p><div className="scoring-legend"><span><b className="legend-old" /> Ancien score : moteur de détection actuel</span><span><b className="legend-new" /> Nouveau score : expérimental, données partielles</span></div></div><span className="result-count">{visibleAlerts.length} résultat{visibleAlerts.length > 1 ? "s" : ""}</span></div>
 
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
@@ -197,7 +220,7 @@ export default function Dashboard() {
               const v2 = alert.scoring_v2 ?? v2Scores.get(alert.id);
               return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
-                  <div className="score-pair"><div className="score-column"><span className="score-caption">ANCIEN</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/100</span></div><div className="score-column score-column-v2"><span className="score-caption">NOUVEAU</span><strong className="score score-v2">{v2?.score ?? "—"}</strong><span className="score-outof">/100</span></div></div>
+                  <div className="score-pair"><div className="score-column"><span className="score-caption">V2 · PRINCIPAL</span><strong className="score score-v2">{v2?.score ?? "—"}</strong><span className="score-outof">/100</span></div><div className="score-column score-column-legacy"><span className="score-caption">V1</span><strong className={alert.score >= 70 ? "score score-secondary high" : alert.score >= 40 ? "score score-secondary medium" : "score score-secondary low"}>{alert.score}</strong><span className="score-outof">/100</span></div></div>
                   <div className="alert-main">
                     <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className={`confidence-pill ${alert.confidence}`}>{confidenceLabel(alert.confidence)} confiance</span></div>
                     <div className="alert-meta"><span>{alert.alert_type === "grouped" ? "◉ Activité groupée" : "◉ Transaction isolée"}</span><span>Portefeuille <code>{shortWallet(alert.wallet)}</code></span><span>{date(alert.created_at)}</span></div>
