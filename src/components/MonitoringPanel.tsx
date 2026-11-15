@@ -45,6 +45,7 @@ const scanStatus = (status: string | null) => {
   if (["success", "completed", "ok", "finished"].includes(value)) return "success";
   if (["running", "started", "processing"].includes(value)) return "running";
   if (["failed", "error"].includes(value)) return "failed";
+  if (["partial"].includes(value)) return "partial";
   return "unknown";
 };
 
@@ -84,7 +85,7 @@ export default function MonitoringPanel() {
 
   const stats = data?.stats;
   const lastStatus = scanStatus(data?.lastScan?.status ?? null);
-  const systemHealthy = !!data?.lastScan && lastStatus !== "failed" && (data.lastScan.errorCount ?? 0) === 0;
+  const systemHealthy = !!data?.lastScan && lastStatus === "success" && (data.lastScan.errorCount ?? 0) === 0;
 
   return (
     <section className="monitoring-section" id="monitoring">
@@ -106,7 +107,7 @@ export default function MonitoringPanel() {
           <span className={`monitor-pulse ${systemHealthy ? "healthy" : lastStatus === "failed" ? "unhealthy" : "pending"}`} />
           <div>
             <span className="detail-label">ÉTAT DU SCANNER</span>
-            <strong>{loading ? "Vérification…" : !data?.lastScan ? "Aucune exécution connue" : lastStatus === "failed" ? "Dernière exécution en échec" : lastStatus === "running" ? "Exécution en cours" : systemHealthy ? "Dernière exécution sans erreur signalée" : "État à vérifier"}</strong>
+            <strong>{loading ? "Vérification…" : !data?.lastScan ? "Aucune exécution connue" : lastStatus === "failed" ? "Dernière exécution en échec" : lastStatus === "running" ? "Exécution en cours" : lastStatus === "partial" ? "Dernière exécution avec avertissements" : systemHealthy ? "Dernière exécution sans erreur signalée" : "État à vérifier"}</strong>
             <small>{data?.lastScan ? `${duration(data.lastScanAgeMinutes)} · démarrée le ${date(data.lastScan.started_at)}` : "Les journaux de scan ne contiennent pas encore d’exécution."}</small>
           </div>
         </div>
