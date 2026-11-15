@@ -4,15 +4,23 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
 import { computeV2Scores } from "@/lib/scoring-v2";
 
-type Factor = { code?: string; label_fr?: string; label_en?: string; points?: number; detail?: string };
+type Factor = { code?: string; label?: string; label_fr?: string; label_en?: string; points?: number; score?: number; weight?: number; detail?: string };
 type Trade = { trade_id: string; transaction_hash: string; wallet: string; pseudonym: string | null; side: string; outcome: string | null; price: number; size: number; usd_amount: number; traded_at: string };
 type Market = { question: string; url: string; category: string | null; liquidity: number | null; volume: number | null; end_date: string | null };
+type V2Signal = {
+  id: string; dedupe_key: string; wallet: string; market_id: string; condition_id: string;
+  side: string; outcome: string | null; trade_ids: string[]; total_usd: number; price_min: number | null; price_avg: number | null;
+  first_trade_at: string; last_trade_at: string; score: number; coverage: number; regime: string;
+  factors: Factor[]; missing_data: string[]; model_version: string; computed_at: string | null;
+  market: Market | null; trades: Trade[];
+};
 type Alert = {
   id: string; wallet: string; market_id: string; condition_id: string; alert_type: string;
   score: number; confidence: string; factors: Factor[]; missing_data: string[]; trade_ids: string[];
   total_usd: number; price_min: number | null; outcome: string | null;
   first_trade_at: string | null; last_trade_at: string | null; created_at: string;
   market: Market | null; trades: Trade[];
+  scoring_v2?: { score: number; coverage: number; regime?: string; factors: { code: string; label: string; score: number; weight: number; detail: string }[]; unavailable: string[]; model_version?: string; computed_at?: string } | null;
 };
 
 const money = (value: number | string | null | undefined) =>
@@ -28,6 +36,7 @@ const missingLabel: Record<string, string> = {
 
 export default function Dashboard() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [signalsV2, setSignalsV2] = useState<V2Signal[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -51,6 +60,7 @@ export default function Dashboard() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || "Le chargement des alertes a échoué.");
       setAlerts(payload.alerts ?? []);
+      setSignalsV2(payload.signalsV2 ?? []);
       setUpdatedAt(payload.generatedAt ?? new Date().toISOString());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Une erreur inattendue est survenue.");
@@ -123,6 +133,45 @@ export default function Dashboard() {
           <article className="metric-card"><span className="metric-label">Confiance élevée</span><strong>{loading ? "—" : highConfidence}</strong><small>Alertes avec données suffisamment complètes</small><span className="metric-icon">✓</span></article>
         </section>
 
+        <section className="alerts-section" id="v2-signals">
+          <div className="section-heading"><div><span className="eyebrow">MOTEUR INDÉPENDANT · V2</span><h2>Nouveaux signaux détectés</h2><p>Achats et ventes, toutes les zones de prix. Ces signaux ne dépendent pas du filtre historique à 20 cents.</p></div><span className="result-count">{signalsV2.length} signal{signalsV2.length > 1 ? "x" : ""}</span></div>
+          {!loading && signalsV2.length === 0 && <div className="empty-state"><strong>Aucun signal V2 pour le moment</strong><span>Les signaux apparaîtront après le prochain passage du scanner sur les marchés.</span></div>}
+          <div className="alert-list">
+            {signalsV2.map((signal) => {
+              const key = `v2:${signal.id}`;
+              const isOpen = expanded === key;
+              return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={key}>
+                <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : key)} aria-expanded={isOpen}>
+                  <div className="score-column"><span className="score-caption">V2 · {signal.regime}</span><strong className="score score-v2">{signal.score}</strong><span className="score-outof">/100</span></div>
+                  <div className="alert-main">
+                    <div className="alert-title-row"><h3>{signal.market?.question || "Marché non retrouvé"}</h3><span className={signal.side === "BUY" ? "side-buy" : "side-sell"}>{signal.side === "BUY" ? "Achat" : "Vente"} · {signal.outcome || "Résultat inconnu"}</span></div>
+                    <div className="alert-meta"><span>Portefeuille <code>{shortWallet(signal.wallet)}</code></span><span>{date(signal.first_trade_at)}</span><span>Couverture {signal.coverage}%</span></div>
+                    <div className="alert-tags">{(signal.factors ?? []).slice(0,3).map((factor,i) => <span key={factor.code ?? i}>{factor.label_fr || factor.label_en || factor.code} <b>{Number(factor.score ?? 0).toFixed(0)}/100</b></span>)}</div>
+                  </div>
+                  <div className="amount-column"><span>Montant associé</span><strong>{money(signal.total_usd)}</strong><small>{signal.trades?.length ?? signal.trade_ids?.length ?? 0} transaction(s)</small></div>
+                  <span className="expand-icon">{isOpen ? "−" : "+"}</span>
+                </button>
+                {isOpen && <div className="alert-details">
+                  <div className="detail-grid">
+                    <div className="detail-block"><span className="detail-label">PORTEFEUILLE</span><strong className="mono">{shortWallet(signal.wallet)}</strong><div className="wallet-actions"><button className="text-action" onClick={() => navigator.clipboard?.writeText(signal.wallet)}>Copier l’adresse</button><a className="text-action" href={`https://polymarket.com/profile/${encodeURIComponent(signal.wallet)}`} target="_blank" rel="noreferrer">Voir le profil Polymarket ↗</a></div></div>
+                    <div className="detail-block"><span className="detail-label">PRIX MOYEN PONDÉRÉ</span><strong>{signal.price_avg == null ? "—" : `${(Number(signal.price_avg)*100).toFixed(2)} %`}</strong></div>
+                    <div className="detail-block"><span className="detail-label">PRIX MINIMUM</span><strong>{signal.price_min == null ? "—" : `${(Number(signal.price_min)*100).toFixed(2)} %`}</strong></div>
+                    <div className="detail-block"><span className="detail-label">RÉGIME DE PRIX</span><strong>{signal.regime}</strong></div>
+                    <div className="detail-block"><span className="detail-label">PREMIÈRE TRANSACTION</span><strong>{date(signal.first_trade_at)}</strong></div>
+                    <div className="detail-block"><span className="detail-label">DERNIÈRE TRANSACTION</span><strong>{date(signal.last_trade_at)}</strong></div>
+                  </div>
+                  <div className="detail-section"><h4>Décomposition du nouveau score · {signal.score}/100</h4><div className="factor-list">{(signal.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur calculé"}</small></div><b>{Number(factor.score ?? 0).toFixed(0)}/100 · {Number(factor.weight ?? 0).toFixed(0)} %</b></div>)}</div></div>
+                  {(signal.missing_data ?? []).length > 0 && <div className="missing-note"><strong>Données encore manquantes</strong><span>{signal.missing_data.join(" · ")}</span><small>La couverture indique la part des pondérations effectivement calculées.</small></div>}
+                  <div className="detail-section"><div className="subheading-row"><h4>Transactions du signal</h4><span>{signal.trades?.length ?? 0} chargée(s)</span></div>
+                    {signal.trades?.length ? <div className="trade-table-wrap"><table className="trade-table"><thead><tr><th>DATE</th><th>SENS</th><th>ISSUE</th><th>PRIX</th><th>QUANTITÉ</th><th>MONTANT</th><th>TRANSACTION</th></tr></thead><tbody>{signal.trades.map((trade) => <tr key={trade.trade_id}><td>{date(trade.traded_at)}</td><td><span className={trade.side === "BUY" ? "side-buy" : "side-sell"}>{trade.side === "BUY" ? "Achat" : "Vente"}</span></td><td>{trade.outcome || signal.outcome || "—"}</td><td>{(Number(trade.price)*100).toFixed(2)} %</td><td>{Number(trade.size).toLocaleString("fr-FR",{maximumFractionDigits:2})}</td><td>{money(trade.usd_amount)}</td><td><code>{trade.transaction_hash ? trade.transaction_hash.slice(0,10)+"…" : trade.trade_id.slice(0,10)+"…"}</code></td></tr>)}</tbody></table></div> : <p className="no-trades">Les transactions associées ne sont plus présentes dans l’historique brut.</p>}
+                  </div>
+                  <div className="detail-footer"><span>ID marché : <code>{signal.market_id}</code></span><span>Condition : <code>{shortWallet(signal.condition_id)}</code></span>{signal.market?.url && <a href={signal.market.url} target="_blank" rel="noreferrer">Ouvrir le marché sur Polymarket ↗</a>}</div>
+                </div>}
+              </article>;
+            })}
+          </div>
+        </section>
+
         <section className="alerts-section" id="alerts">
           <div className="section-heading"><div><span className="eyebrow">CENTRE DE SIGNALEMENT</span><h2>Alertes récentes</h2><p>Chaque signal est une piste à examiner, pas une preuve de fraude.</p><div className="scoring-legend"><span><b className="legend-old" /> Ancien score : moteur de détection actuel</span><span><b className="legend-new" /> Nouveau score : expérimental, données partielles</span></div></div><span className="result-count">{visibleAlerts.length} résultat{visibleAlerts.length > 1 ? "s" : ""}</span></div>
 
@@ -145,7 +194,7 @@ export default function Dashboard() {
           <div className="alert-list">
             {visibleAlerts.map((alert) => {
               const isOpen = expanded === alert.id;
-              const v2 = v2Scores.get(alert.id);
+              const v2 = alert.scoring_v2 ?? v2Scores.get(alert.id);
               return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
                   <div className="score-pair"><div className="score-column"><span className="score-caption">ANCIEN</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/100</span></div><div className="score-column score-column-v2"><span className="score-caption">NOUVEAU</span><strong className="score score-v2">{v2?.score ?? "—"}</strong><span className="score-outof">/100</span></div></div>
@@ -168,7 +217,7 @@ export default function Dashboard() {
                     <div className="detail-block"><span className="detail-label">CATÉGORIE</span><strong>{alert.market?.category || "—"}</strong></div>
                   </div>
 
-                  <div className="detail-section v2-panel"><div className="subheading-row"><h4>Nouveau scoring — {v2?.score ?? "—"}/100</h4><span>{v2?.coverage ?? 0} % des pondérations couvertes par les données disponibles</span></div><p className="v2-disclaimer">Score parallèle de comparaison. Il utilise les alertes chargées comme population de référence ; ce n’est pas encore une distribution complète de tous les trades Polymarket. Le profil wallet complet et l’impact post-trade ne sont pas encore mesurables.</p><div className="factor-list">{(v2?.factors ?? []).map((factor) => <div className="factor-row" key={factor.code}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.score.toFixed(0)}/100 · {factor.weight} %</b></div>)}</div>{(v2?.unavailable ?? []).length > 0 && <p className="v2-missing">À compléter : {v2?.unavailable.join(" · ")}</p>}</div><div className="detail-section"><h4>Pourquoi l’ancien moteur a déclenché cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
+                  <div className="detail-section v2-panel"><div className="subheading-row"><h4>Nouveau scoring — {v2?.score ?? "—"}/100</h4><span>{v2?.coverage ?? 0} % des pondérations couvertes{alert.scoring_v2?.regime ? ` · régime ${alert.scoring_v2.regime}` : ""}{alert.scoring_v2?.model_version ? ` · ${alert.scoring_v2.model_version}` : ""}</span></div><p className="v2-disclaimer">Score parallèle de comparaison. Il utilise les alertes chargées comme population de référence ; ce n’est pas encore une distribution complète de tous les trades Polymarket. Le profil wallet complet et l’impact post-trade ne sont pas encore mesurables.</p><div className="factor-list">{(v2?.factors ?? []).map((factor) => <div className="factor-row" key={factor.code}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.score.toFixed(0)}/100 · {factor.weight} %</b></div>)}</div>{(v2?.unavailable ?? []).length > 0 && <p className="v2-missing">À compléter : {v2?.unavailable.join(" · ")}</p>}</div><div className="detail-section"><h4>Pourquoi l’ancien moteur a déclenché cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
 
                   {(alert.missing_data ?? []).length > 0 && <div className="missing-note"><strong>Informations non disponibles</strong><span>{alert.missing_data.map((key) => missingLabel[key] || key).join(" · ")}</span><small>Ces données manquantes expliquent le niveau de confiance réduit. Elles ne sont pas assimilées à des anomalies.</small></div>}
 
