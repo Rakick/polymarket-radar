@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
 import { computeV2Scores } from "@/lib/scoring-v2";
+import MonitoringPanel from "@/components/MonitoringPanel";
 
 type Factor = { code?: string; label?: string; label_fr?: string; label_en?: string; points?: number; score?: number; weight?: number; detail?: string };
 type Trade = { trade_id: string; transaction_hash: string; wallet: string; pseudonym: string | null; side: string; outcome: string | null; price: number; size: number; usd_amount: number; traded_at: string };
@@ -136,7 +137,7 @@ export default function Dashboard() {
         <button className={`nav-item ${activeView === "v2-signals" ? "active" : ""}`} onClick={() => navigateTo("v2-signals")}><span>◈</span> Intelligence V2 <b>{signalsV2.length}</b></button>
         <button className={`nav-item ${activeView === "v1-alerts" ? "active" : ""}`} onClick={() => navigateTo("v1-alerts")}><span>⌁</span> Alertes V1 <b>{alerts.length}</b></button>
         <div className="sidebar-label nav-secondary-label">MONITORING</div>
-        <div className="nav-static"><span>◎</span> Surveillance active</div>
+        <button className={`nav-item ${activeView === "monitoring" ? "active" : ""}`} onClick={() => navigateTo("monitoring")}><span>◎</span> Surveillance active</button>
         <div className="sidebar-bottom">
           <div className="system-card"><span className="status-dot" /> <span><strong>Scanner actif</strong><small>Synchronisation automatique</small></span></div>
           <button className="logout-button" onClick={() => browserClient().auth.signOut()}>↗ Déconnexion</button>
@@ -254,6 +255,7 @@ export default function Dashboard() {
           </div>
           <footer className="list-footer"><span>{updatedAt ? `Données actualisées à ${date(updatedAt)}` : "En attente de synchronisation"}</span><span>Actualisation automatique chaque minute</span></footer>
         </section>
+        <MonitoringPanel />
         <footer className="page-footer">POLYMARKET RADAR <span>•</span> Outil d’aide à l’analyse — les alertes ne constituent pas des preuves de fraude.</footer>
       </section>
     </main>
