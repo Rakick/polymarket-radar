@@ -81,7 +81,7 @@ export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
       "profil historique fiable du wallet (ROI, win rate, ancienneté)",
       "impact réel du trade après exécution (snapshots de prix absents)",
     ];
-    results.set(alert.id, { score, coverage: Math.round(weightTotal), factors: candidates.sort((a,b) => b.score*b.weight - a.score*a.weight), unavailable });
+    if (score >= 50) results.set(alert.id, { score, coverage: Math.round(weightTotal), factors: candidates.sort((a,b) => b.score*b.weight - a.score*a.weight), unavailable });
   }
   return results;
 }
