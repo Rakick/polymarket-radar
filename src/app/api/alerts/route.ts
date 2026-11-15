@@ -5,6 +5,8 @@ import { hasAuthenticatedUser } from "@/lib/api-auth";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+const V2_DISPLAY_MIN_SCORE = 50;
+
 export async function GET(request: NextRequest) {
   if (!(await hasAuthenticatedUser(request))) {
     return NextResponse.json({ error: "Session expirée. Reconnectez-vous." }, { status: 401 });
@@ -23,7 +25,12 @@ export async function GET(request: NextRequest) {
 
     const alertIds = (alerts ?? []).map((a) => a.id);
     const { data: signalsV2, error: signalsV2Error } = await db.from("scoring_v2_signals")
-      .select("*").not("computed_at", "is", null).order("score", { ascending: false }).order("first_trade_at", { ascending: false }).limit(500);
+      .select("*")
+      .gte("score", V2_DISPLAY_MIN_SCORE)
+      .not("computed_at", "is", null)
+      .order("score", { ascending: false })
+      .order("first_trade_at", { ascending: false })
+      .limit(500);
     if (signalsV2Error) throw signalsV2Error;
 
     const marketIds = [...new Set([...(alerts ?? []).map((a) => a.market_id), ...(signalsV2 ?? []).map((s) => s.market_id)].filter(Boolean))];
@@ -36,7 +43,7 @@ export async function GET(request: NextRequest) {
         ? db.from("trades").select("trade_id,transaction_hash,wallet,pseudonym,market_id,condition_id,side,outcome,price,size,usd_amount,traded_at").in("trade_id", tradeIds).order("traded_at", { ascending: false })
         : Promise.resolve({ data: [], error: null }),
       alertIds.length
-        ? db.from("alert_scores_v2").select("alert_id,score,coverage,regime,factors,missing_data,model_version,computed_at").in("alert_id", alertIds)
+        ? db.from("alert_scores_v2").select("alert_id,score,coverage,regime,factors,missing_data,model_version,computed_at").gte("score", V2_DISPLAY_MIN_SCORE).in("alert_id", alertIds)
         : Promise.resolve({ data: [], error: null }),
     ]);
 
