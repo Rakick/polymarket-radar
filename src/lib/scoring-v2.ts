@@ -23,10 +23,8 @@ const daysBetween = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 
  */
 export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
   const byMarket = new Map<string, V2Alert[]>();
-  const byWallet = new Map<string, V2Alert[]>();
   for (const alert of alerts) {
     byMarket.set(alert.market_id, [...(byMarket.get(alert.market_id) ?? []), alert]);
-    byWallet.set(alert.wallet.toLowerCase(), [...(byWallet.get(alert.wallet.toLowerCase()) ?? []), alert]);
   }
 
   const results = new Map<string, V2Result>();
@@ -71,7 +69,7 @@ export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
       ...(sizeScore == null ? [] : [{ code: "relative_size", label: "Taille relative", score: sizeScore, weight: 20, detail: `Écart robuste vs ${reference.length} alertes comparables (${marketPeers.length >= 5 ? "même marché" : "référence globale"})` }]),
       ...(convictionScore == null ? [] : [{ code: "conviction", label: "Conviction financière", score: convictionScore, weight: 15, detail: `${(volumeShare * 100).toFixed(3)} % du volume cumulé du marché (proxy, pas volume 24 h)` }]),
       ...(timingScore == null ? [] : [{ code: "timing", label: "Timing", score: timingScore, weight: 10, detail: timingDetail }]),
-      { code: "coordination", label: "Coordination observée", score: coordinationScore, weight: 10, detail: `${new Set(nearby.map(a => a.wallet.toLowerCase())).size} autre(s) portefeuille(s) alerté(s) dans une fenêtre de 30 min` },
+      ...(marketPeers.some(peer => peer.first_trade_at || peer.last_trade_at) ? [{ code: "coordination", label: "Coordination observée", score: coordinationScore, weight: 10, detail: `${new Set(nearby.map(a => a.wallet.toLowerCase())).size} autre(s) portefeuille(s) alerté(s) dans une fenêtre de 30 min` }] : []),
     ];
     const weightTotal = candidates.reduce((sum, f) => sum + f.weight, 0);
     const score = weightTotal ? Math.round(candidates.reduce((sum, f) => sum + f.score * f.weight, 0) / weightTotal) : 0;
@@ -79,6 +77,7 @@ export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
       ...(reference.length < 5 ? ["baseline robuste de taille (moins de 5 comparables)"] : []),
       ...(marketVolume <= 0 ? ["volume du marché"] : []),
       ...(!tradeAt || !endAt ? ["timing / date de résolution"] : []),
+      ...(!marketPeers.some(peer => peer.first_trade_at || peer.last_trade_at) ? ["coordination (pas de pairs datés dans le jeu chargé)"] : []),
       "profil historique fiable du wallet (ROI, win rate, ancienneté)",
       "impact réel du trade après exécution (snapshots de prix absents)",
     ];
