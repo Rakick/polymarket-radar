@@ -1,0 +1,1 @@
+revoke all on function public.capture_market_price_snapshot() from public,anon,authenticated; grant execute on function public.capture_market_price_snapshot() to service_role;
