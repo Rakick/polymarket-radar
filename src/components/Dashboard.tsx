@@ -13,6 +13,7 @@ type Alert = {
   total_usd: number; price_min: number | null; outcome: string | null;
   first_trade_at: string | null; last_trade_at: string | null; created_at: string;
   market: Market | null; trades: Trade[];
+  scoring_v2?: { score: number; coverage: number; regime?: string; factors: { code: string; label: string; score: number; weight: number; detail: string }[]; unavailable: string[]; model_version?: string; computed_at?: string } | null;
 };
 
 const money = (value: number | string | null | undefined) =>
@@ -145,7 +146,7 @@ export default function Dashboard() {
           <div className="alert-list">
             {visibleAlerts.map((alert) => {
               const isOpen = expanded === alert.id;
-              const v2 = v2Scores.get(alert.id);
+              const v2 = alert.scoring_v2 ?? v2Scores.get(alert.id);
               return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
                   <div className="score-pair"><div className="score-column"><span className="score-caption">ANCIEN</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/100</span></div><div className="score-column score-column-v2"><span className="score-caption">NOUVEAU</span><strong className="score score-v2">{v2?.score ?? "—"}</strong><span className="score-outof">/100</span></div></div>
@@ -168,7 +169,7 @@ export default function Dashboard() {
                     <div className="detail-block"><span className="detail-label">CATÉGORIE</span><strong>{alert.market?.category || "—"}</strong></div>
                   </div>
 
-                  <div className="detail-section v2-panel"><div className="subheading-row"><h4>Nouveau scoring — {v2?.score ?? "—"}/100</h4><span>{v2?.coverage ?? 0} % des pondérations couvertes par les données disponibles</span></div><p className="v2-disclaimer">Score parallèle de comparaison. Il utilise les alertes chargées comme population de référence ; ce n’est pas encore une distribution complète de tous les trades Polymarket. Le profil wallet complet et l’impact post-trade ne sont pas encore mesurables.</p><div className="factor-list">{(v2?.factors ?? []).map((factor) => <div className="factor-row" key={factor.code}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.score.toFixed(0)}/100 · {factor.weight} %</b></div>)}</div>{(v2?.unavailable ?? []).length > 0 && <p className="v2-missing">À compléter : {v2?.unavailable.join(" · ")}</p>}</div><div className="detail-section"><h4>Pourquoi l’ancien moteur a déclenché cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
+                  <div className="detail-section v2-panel"><div className="subheading-row"><h4>Nouveau scoring — {v2?.score ?? "—"}/100</h4><span>{v2?.coverage ?? 0} % des pondérations couvertes{alert.scoring_v2?.regime ? ` · régime ${alert.scoring_v2.regime}` : ""}{alert.scoring_v2?.model_version ? ` · ${alert.scoring_v2.model_version}` : ""}</span></div><p className="v2-disclaimer">Score parallèle de comparaison. Il utilise les alertes chargées comme population de référence ; ce n’est pas encore une distribution complète de tous les trades Polymarket. Le profil wallet complet et l’impact post-trade ne sont pas encore mesurables.</p><div className="factor-list">{(v2?.factors ?? []).map((factor) => <div className="factor-row" key={factor.code}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.score.toFixed(0)}/100 · {factor.weight} %</b></div>)}</div>{(v2?.unavailable ?? []).length > 0 && <p className="v2-missing">À compléter : {v2?.unavailable.join(" · ")}</p>}</div><div className="detail-section"><h4>Pourquoi l’ancien moteur a déclenché cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
 
                   {(alert.missing_data ?? []).length > 0 && <div className="missing-note"><strong>Informations non disponibles</strong><span>{alert.missing_data.map((key) => missingLabel[key] || key).join(" · ")}</span><small>Ces données manquantes expliquent le niveau de confiance réduit. Elles ne sont pas assimilées à des anomalies.</small></div>}
 
