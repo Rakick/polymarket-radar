@@ -21,13 +21,13 @@ export async function GET(request: NextRequest) {
 
     if (error) throw error;
 
-    const marketIds = [...new Set([...(alerts ?? []).map((a) => a.market_id), ...(signalsV2 ?? []).map((s) => s.market_id)].filter(Boolean))];
-    const tradeIds = [...new Set([...(alerts ?? []).flatMap((a) => a.trade_ids ?? []), ...(signalsV2 ?? []).flatMap((s) => s.trade_ids ?? [])])].slice(0, 10000);
-
     const alertIds = (alerts ?? []).map((a) => a.id);
     const { data: signalsV2, error: signalsV2Error } = await db.from("scoring_v2_signals")
       .select("*").order("score", { ascending: false }).order("first_trade_at", { ascending: false }).limit(500);
     if (signalsV2Error) throw signalsV2Error;
+
+    const marketIds = [...new Set([...(alerts ?? []).map((a) => a.market_id), ...(signalsV2 ?? []).map((s) => s.market_id)].filter(Boolean))];
+    const tradeIds = [...new Set([...(alerts ?? []).flatMap((a) => a.trade_ids ?? []), ...(signalsV2 ?? []).flatMap((s) => s.trade_ids ?? [])])].slice(0, 10000);
     const [marketResult, tradeResult, scoreResult] = await Promise.all([
       marketIds.length
         ? db.from("markets").select("id,question,url,category,liquidity,volume,end_date,outcomes,outcome_prices").in("id", marketIds)
