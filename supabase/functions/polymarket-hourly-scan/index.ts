@@ -298,6 +298,46 @@ function buildAlerts(trades: Trade[], settings: Settings, walletContext: Record<
   return alerts;
 }
 
+async function syncResolvedMarkets() {
+  const cutoff = new Date(Date.now()).toISOString();
+  const { data: candidates, error } = await db.from("markets")
+    .select("id,end_date,closed,outcomes,outcome_prices")
+    .not("end_date", "is", null)
+    .lte("end_date", cutoff)
+    .order("end_date", { ascending: true })
+    .limit(1000);
+  if (error) throw new Error(`Lecture des marchés à résoudre: ${error.message}`);
+  let checked = 0, updated = 0;
+  const errors: string[] = [];
+  for (let offset = 0; offset < (candidates ?? []).length; offset += 10) {
+    await Promise.all((candidates ?? []).slice(offset, offset + 10).map(async (market: any) => {
+      const existingPrices = Array.isArray(market.outcome_prices) ? market.outcome_prices.map(Number) : [];
+      const existingWinnerCount = existingPrices.filter((price: number) => price >= 0.99).length;
+      if (market.closed === true && existingWinnerCount === 1 && existingPrices.every((price: number) => price >= 0.99 || price <= 0.01)) return;
+      try {
+        const gamma = await fetchJson<any>(`https://gamma-api.polymarket.com/markets/${encodeURIComponent(String(market.id))}`);
+        checked++;
+        if (gamma.closed !== true) return;
+        const outcomes = parseArray(gamma.outcomes).map(String);
+        const prices = parseArray(gamma.outcomePrices).map(Number);
+        if (!outcomes.length || outcomes.length !== prices.length || prices.some((price: number) => !Number.isFinite(price))) return;
+        const { error: updateError } = await db.from("markets").update({
+          closed: true,
+          accepting_orders: false,
+          outcomes,
+          outcome_prices: prices,
+          updated_at: new Date().toISOString(),
+        }).eq("id", market.id);
+        if (updateError) errors.push(`Résolution ${market.id}: ${updateError.message}`);
+        else updated++;
+      } catch (e) {
+        errors.push(`Vérification résolution ${market.id}: ${(e as Error).message}`);
+      }
+    }));
+  }
+  return { checked, updated, errors };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
   const auth = req.headers.get("authorization") ?? "";
@@ -325,7 +365,11 @@ Deno.serve(async (req: Request) => {
 
   const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0, v2SignalCount = 0;
   let batchStart = 0;
+  let resolvedMarketsUpdated = 0;
   try {
+    const resolutionSync = await syncResolvedMarkets();
+    resolvedMarketsUpdated = resolutionSync.updated;
+    errors.push(...resolutionSync.errors);
     let { data: catalogue, error: catalogueError } = await db.from("markets")
       .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category")
       .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
@@ -459,7 +503,7 @@ Deno.serve(async (req: Request) => {
     if (checkpointWriteError) errors.push(`Enregistrement du checkpoint V2: ${checkpointWriteError.message}`);
   }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
-  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
+  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets, resolved_markets_updated: resolvedMarketsUpdated, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
   const { error: finishError } = await db.from("scans").update({
     finished_at: new Date().toISOString(), ...result,
   }).eq("id", scan.id);

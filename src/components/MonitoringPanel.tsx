@@ -22,11 +22,15 @@ type MonitoringData = {
     v2Signals: number; qualifiedV2: number; snapshots: number; scans24h: number;
     averageScore: number; averageCoverage: number; computedV2: number;
     regimes: Record<string, number>;
+    resolvedWins: number; resolvedLosses: number; resolvedSignals: number;
+    pendingSignals: number; unclassifiableSignals: number; winRate: number | null;
+    scoreBands: Array<{ label: string; count: number; wins: number; losses: number; winRate: number | null }>;
   };
   latestSnapshotAt: string | null;
   lastScan: Scan | null;
   lastScanAgeMinutes: number | null;
   recentScans: Scan[];
+  latestOutcomes: Array<{ id: string; question: string; marketUrl: string | null; outcome: string; side: string; score: number; totalUsd: number; firstTradeAt: string | null; won: boolean }>;
 };
 
 const number = (value: number) => new Intl.NumberFormat("fr-FR").format(value);
@@ -52,11 +56,10 @@ const scanStatus = (status: string | null) => {
 export default function MonitoringPanel() {
   const [data, setData] = useState<MonitoringData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
-  const load = useCallback(async (quiet = false) => {
-    if (quiet) setRefreshing(true); else setLoading(true);
+  const load = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoading(true);
     setError("");
     try {
       const { data: sessionData } = await browserClient().auth.getSession();
@@ -73,13 +76,12 @@ export default function MonitoringPanel() {
       setError(e instanceof Error ? e.message : "Une erreur inattendue est survenue.");
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(true), 60_000);
+    void load(true);
+    const timer = window.setInterval(() => void load(false), 60_000);
     return () => window.clearInterval(timer);
   }, [load]);
 
@@ -95,9 +97,6 @@ export default function MonitoringPanel() {
           <h2>Centre de monitoring</h2>
           <p>État du scanner, qualité des données collectées et statistiques des moteurs V1 et V2.</p>
         </div>
-        <button className="refresh-button" onClick={() => void load(true)} disabled={refreshing}>
-          {refreshing ? "Actualisation…" : "↻ Actualiser"}
-        </button>
       </div>
 
       {error && <div className="error-banner"><strong>Monitoring indisponible</strong><span>{error}</span><button onClick={() => void load()}>Réessayer</button></div>}
@@ -174,6 +173,30 @@ export default function MonitoringPanel() {
             </div>;
           })}
         </div>
+      </div>
+
+      <div className="monitor-subheading"><div><h3>Résultats des signaux V2</h3><p>Seuls les achats sont évalués : une vente peut simplement clôturer une position et ne signifie pas un pari contre le résultat. Les marchés sans issue finale vérifiable restent en attente.</p></div></div>
+      <div className="outcome-stat-grid">
+        <article className="outcome-stat-card"><span>Signaux gagnants</span><strong>{loading ? "—" : number(stats?.resolvedWins ?? 0)}</strong><small>Issue achetée gagnante</small></article>
+        <article className="outcome-stat-card"><span>Signaux perdants</span><strong>{loading ? "—" : number(stats?.resolvedLosses ?? 0)}</strong><small>Issue achetée perdante</small></article>
+        <article className="outcome-stat-card"><span>Taux de réussite</span><strong>{loading ? "—" : stats?.winRate == null ? "—" : `${stats.winRate}%`}</strong><small>Sur {number(stats?.resolvedSignals ?? 0)} signaux résolus</small></article>
+        <article className="outcome-stat-card"><span>En attente</span><strong>{loading ? "—" : number(stats?.pendingSignals ?? 0)}</strong><small>Marchés non résolus ou prix non définitifs</small></article>
+      </div>
+      <div className="outcome-calibration">
+        <h4>Résultats par tranche de score</h4>
+        <div className="outcome-calibration-grid">
+          {(stats?.scoreBands ?? []).map((band) => <div className="outcome-calibration-row" key={band.label}>
+            <b>{band.label}</b><span>{number(band.count)} résolus</span><span>{number(band.wins)} gagnants</span><strong>{band.winRate == null ? "—" : `${band.winRate}%`}</strong>
+          </div>)}
+        </div>
+      </div>
+      <div className="outcome-history">
+        <h4>Derniers signaux évalués</h4>
+        {!loading && (data?.latestOutcomes.length ?? 0) === 0 && <div className="empty-state">Aucun signal BUY n’a encore un résultat final vérifiable. Les marchés suivis sont évalués automatiquement après leur résolution.</div>}
+        {data?.latestOutcomes.map((item) => <article className="outcome-history-row" key={item.id}>
+          <div className="outcome-history-main"><strong>{item.question}</strong><small>{item.outcome} · Score V2 {item.score}/100 · {item.firstTradeAt ? date(item.firstTradeAt) : "Date inconnue"}</small></div>
+          <span className={`outcome-result ${item.won ? "won" : "lost"}`}>{item.won ? "Gagnant" : "Perdant"}</span>
+        </article>)}
       </div>
 
       <div className="monitor-subheading"><div><h3>Journal des exécutions</h3><p>Les 12 derniers passages du scanner enregistrés dans la base.</p></div></div>
