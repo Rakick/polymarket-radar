@@ -147,7 +147,7 @@ button,input,select{font:inherit}button{cursor:pointer}
 .scan-row{display:grid;grid-template-columns:8px minmax(150px,1.6fr) repeat(4,minmax(65px,.7fr)) auto;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line)}
 .scan-row:last-child{border-bottom:0}
 .scan-state{width:7px;height:7px;border-radius:50%;background:var(--warning)}
-.scan-state.success{background:var(--good)}.scan-state.failed{background:var(--danger)}.scan-state.running{background:var(--accent)}
+.scan-state.success{background:var(--good)}.scan-state.failed{background:var(--danger)}.scan-state.running{background:var(--accent)}.scan-state.partial{background:var(--warning)}
 .scan-time strong,.scan-time small,.scan-metric b,.scan-metric small{display:block}
 .scan-time strong{font-size:10px;font-weight:650}
 .scan-time small{font-size:9px;color:var(--muted);margin-top:4px}
