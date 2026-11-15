@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
 import { computeV2Scores } from "@/lib/scoring-v2";
 
-type Factor = { code?: string; label_fr?: string; label_en?: string; points?: number; detail?: string };
+type Factor = { code?: string; label?: string; label_fr?: string; label_en?: string; points?: number; score?: number; weight?: number; detail?: string };
 type Trade = { trade_id: string; transaction_hash: string; wallet: string; pseudonym: string | null; side: string; outcome: string | null; price: number; size: number; usd_amount: number; traded_at: string };
 type Market = { question: string; url: string; category: string | null; liquidity: number | null; volume: number | null; end_date: string | null };
 type V2Signal = {
