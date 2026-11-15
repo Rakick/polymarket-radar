@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
+import { computeV2Scores } from "@/lib/scoring-v2";
 
 type Factor = { code?: string; label_fr?: string; label_en?: string; points?: number; detail?: string };
 type Trade = { trade_id: string; transaction_hash: string; wallet: string; pseudonym: string | null; side: string; outcome: string | null; price: number; size: number; usd_amount: number; traded_at: string };
@@ -83,11 +84,14 @@ export default function Dashboard() {
         case "amount_asc": return Number(a.total_usd || 0) - Number(b.total_usd || 0);
         case "score_desc": return Number(b.score || 0) - Number(a.score || 0);
         case "score_asc": return Number(a.score || 0) - Number(b.score || 0);
+        case "v2_desc": return (v2Scores.get(b.id)?.score ?? 0) - (v2Scores.get(a.id)?.score ?? 0);
+        case "v2_asc": return (v2Scores.get(a.id)?.score ?? 0) - (v2Scores.get(b.id)?.score ?? 0);
         default: return Number(b.total_usd || 0) - Number(a.total_usd || 0);
       }
     });
-  }, [alerts, query, filter, sortBy]);
+  }, [alerts, query, filter, sortBy, v2Scores]);
 
+  const v2Scores = useMemo(() => computeV2Scores(alerts), [alerts]);
   const highConfidence = alerts.filter((a) => a.confidence === "high").length;
   const totalVolume = alerts.reduce((sum, a) => sum + Number(a.total_usd || 0), 0);
   const uniqueWallets = new Set(alerts.map((a) => a.wallet)).size;
@@ -107,7 +111,7 @@ export default function Dashboard() {
 
       <section className="main-panel">
         <header className="topbar">
-          <div><span className="eyebrow">SURVEILLANCE DES MARCHÉS</span><h1>Vue d’ensemble</h1><p>Repérez les mouvements inhabituels et explorez les signaux détectés.</p></div>
+          <div><span className="eyebrow">SURVEILLANCE DES MARCHÉS</span><h1>Vue d’ensemble</h1><p>Comparez le moteur historique et le nouveau scoring expérimental, sans remplacer les alertes existantes.</p></div>
           <button className="refresh-button" onClick={() => void loadAlerts(true)} disabled={refreshing}>{refreshing ? "Actualisation…" : "↻ Actualiser"}</button>
         </header>
 
@@ -119,7 +123,7 @@ export default function Dashboard() {
         </section>
 
         <section className="alerts-section" id="alerts">
-          <div className="section-heading"><div><span className="eyebrow">CENTRE DE SIGNALEMENT</span><h2>Alertes récentes</h2><p>Chaque signal est une piste à examiner, pas une preuve de fraude.</p></div><span className="result-count">{visibleAlerts.length} résultat{visibleAlerts.length > 1 ? "s" : ""}</span></div>
+          <div className="section-heading"><div><span className="eyebrow">CENTRE DE SIGNALEMENT</span><h2>Alertes récentes</h2><p>Chaque signal est une piste à examiner, pas une preuve de fraude.</p><div className="scoring-legend"><span><b className="legend-old" /> Ancien score : moteur de détection actuel</span><span><b className="legend-new" /> Nouveau score : expérimental, données partielles</span></div></div><span className="result-count">{visibleAlerts.length} résultat{visibleAlerts.length > 1 ? "s" : ""}</span></div>
 
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
@@ -129,7 +133,7 @@ export default function Dashboard() {
                   <button key={key} className={filter === key ? "filter-chip selected" : "filter-chip"} onClick={() => setFilter(key)}>{label}</button>
                 )}
               </div>
-              <label className="sort-control"><span>Trier par</span><select value={sortBy} onChange={(e) => setSortBy(e.target.value)}><option value="amount_desc">Montant : décroissant</option><option value="amount_asc">Montant : croissant</option><option value="score_desc">Score : décroissant</option><option value="score_asc">Score : croissant</option></select></label>
+              <label className="sort-control"><span>Trier par</span><select value={sortBy} onChange={(e) => setSortBy(e.target.value)}><option value="amount_desc">Montant : décroissant</option><option value="amount_asc">Montant : croissant</option><option value="score_desc">Ancien score : décroissant</option><option value="score_asc">Ancien score : croissant</option><option value="v2_desc">Nouveau score : décroissant</option><option value="v2_asc">Nouveau score : croissant</option></select></label>
             </div>
           </div>
 
@@ -140,9 +144,10 @@ export default function Dashboard() {
           <div className="alert-list">
             {visibleAlerts.map((alert) => {
               const isOpen = expanded === alert.id;
+              const v2 = v2Scores.get(alert.id);
               return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
-                  <div className="score-column"><span className="score-caption">{alert.score >= 70 ? "PRIORITAIRE" : alert.score >= 40 ? "NORMALE" : "À SURVEILLER"}</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/ 100</span></div>
+                  <div className="score-pair"><div className="score-column"><span className="score-caption">ANCIEN</span><strong className={alert.score >= 70 ? "score high" : alert.score >= 40 ? "score medium" : "score low"}>{alert.score}</strong><span className="score-outof">/100</span></div><div className="score-column score-column-v2"><span className="score-caption">NOUVEAU</span><strong className="score score-v2">{v2?.score ?? "—"}</strong><span className="score-outof">/100</span></div></div>
                   <div className="alert-main">
                     <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className={`confidence-pill ${alert.confidence}`}>{confidenceLabel(alert.confidence)} confiance</span></div>
                     <div className="alert-meta"><span>{alert.alert_type === "grouped" ? "◉ Activité groupée" : "◉ Transaction isolée"}</span><span>Portefeuille <code>{shortWallet(alert.wallet)}</code></span><span>{date(alert.created_at)}</span></div>
@@ -162,7 +167,7 @@ export default function Dashboard() {
                     <div className="detail-block"><span className="detail-label">CATÉGORIE</span><strong>{alert.market?.category || "—"}</strong></div>
                   </div>
 
-                  <div className="detail-section"><h4>Pourquoi cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
+                  <div className="detail-section v2-panel"><div className="subheading-row"><h4>Nouveau scoring — {v2?.score ?? "—"}/100</h4><span>{v2?.coverage ?? 0} % des pondérations couvertes par les données disponibles</span></div><p className="v2-disclaimer">Score parallèle de comparaison. Il utilise les alertes chargées comme population de référence ; ce n’est pas encore une distribution complète de tous les trades Polymarket. Le profil wallet complet et l’impact post-trade ne sont pas encore mesurables.</p><div className="factor-list">{(v2?.factors ?? []).map((factor) => <div className="factor-row" key={factor.code}><span className="factor-dot factor-dot-v2" /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.score.toFixed(0)}/100 · {factor.weight} %</b></div>)}</div>{(v2?.unavailable ?? []).length > 0 && <p className="v2-missing">À compléter : {v2?.unavailable.join(" · ")}</p>}</div><div className="detail-section"><h4>Pourquoi l’ancien moteur a déclenché cette alerte ?</h4><div className="factor-list">{(alert.factors ?? []).map((factor,i) => <div className="factor-row" key={factor.code ?? i}><span className="factor-dot" /><div><strong>{factor.label_fr || factor.label_en || factor.code}</strong><small>{factor.detail || "Facteur détecté"}</small></div><b>+{Number(factor.points ?? 0).toFixed(1)} pts</b></div>)}</div></div>
 
                   {(alert.missing_data ?? []).length > 0 && <div className="missing-note"><strong>Informations non disponibles</strong><span>{alert.missing_data.map((key) => missingLabel[key] || key).join(" · ")}</span><small>Ces données manquantes expliquent le niveau de confiance réduit. Elles ne sont pas assimilées à des anomalies.</small></div>}
 
