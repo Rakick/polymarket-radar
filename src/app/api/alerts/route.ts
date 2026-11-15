@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
 
     const alertIds = (alerts ?? []).map((a) => a.id);
     const { data: signalsV2, error: signalsV2Error } = await db.from("scoring_v2_signals")
-      .select("*").order("score", { ascending: false }).order("first_trade_at", { ascending: false }).limit(500);
+      .select("*").not("computed_at", "is", null).order("score", { ascending: false }).order("first_trade_at", { ascending: false }).limit(500);
     if (signalsV2Error) throw signalsV2Error;
 
     const marketIds = [...new Set([...(alerts ?? []).map((a) => a.market_id), ...(signalsV2 ?? []).map((s) => s.market_id)].filter(Boolean))];
