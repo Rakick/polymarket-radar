@@ -175,7 +175,7 @@ export default function MonitoringPanel() {
         </div>
       </div>
 
-      <div className="monitor-subheading"><div><h3>Résultats des signaux V2</h3><p>Les achats détectés sont comparés à l’issue finale des marchés résolus par Polymarket. Les marchés encore ouverts restent en attente.</p></div></div>
+      <div className="monitor-subheading"><div><h3>Résultats des signaux V2</h3><p>Seuls les achats sont évalués : une vente peut simplement clôturer une position et ne signifie pas un pari contre le résultat. Les marchés sans issue finale vérifiable restent en attente.</p></div></div>
       <div className="outcome-stat-grid">
         <article className="outcome-stat-card"><span>Signaux gagnants</span><strong>{loading ? "—" : number(stats?.resolvedWins ?? 0)}</strong><small>Issue achetée gagnante</small></article>
         <article className="outcome-stat-card"><span>Signaux perdants</span><strong>{loading ? "—" : number(stats?.resolvedLosses ?? 0)}</strong><small>Issue achetée perdante</small></article>
