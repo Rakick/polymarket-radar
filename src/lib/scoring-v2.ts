@@ -61,7 +61,7 @@ export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
     }
 
     const nearby = marketPeers.filter(peer => {
-      const a = Date.parse(alert.first_trade_at ?? alert.created_at ?? "");
+      const a = Date.parse(alert.first_trade_at ?? alert.last_trade_at ?? "");
       const b = Date.parse(peer.first_trade_at ?? peer.last_trade_at ?? "");
       return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 30 * 60_000 && peer.wallet.toLowerCase() !== alert.wallet.toLowerCase();
     });
@@ -82,7 +82,7 @@ export function computeV2Scores(alerts: V2Alert[]): Map<string, V2Result> {
       "profil historique fiable du wallet (ROI, win rate, ancienneté)",
       "impact réel du trade après exécution (snapshots de prix absents)",
     ];
-    results.set(alert.id, { score, coverage: Math.round(weightTotal), factors: candidates.sort((a,b) => b.score*a.weight - a.score*b.weight), unavailable });
+    results.set(alert.id, { score, coverage: Math.round(weightTotal), factors: candidates.sort((a,b) => b.score*b.weight - a.score*a.weight), unavailable });
   }
   return results;
 }
