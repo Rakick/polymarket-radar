@@ -139,6 +139,48 @@ async function getPolymarketJoinDate(wallet: string): Promise<string | null> {
   return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : null;
 }
 function clamp(value: number, min = 0, max = 1) { return Math.max(min, Math.min(max, value)); }
+
+function buildV2Signals(trades: Trade[], settings: Settings) {
+  const minimumUsd = Math.max(250, Number(settings.min_usd ?? 500));
+  const windowMs = Math.max(5, Number(settings.group_window_minutes ?? 30)) * 60_000;
+  const sorted = trades
+    .filter(t => Number.isFinite(t.usd_amount) && t.usd_amount > 0 && Number.isFinite(Date.parse(t.traded_at)))
+    .sort((a,b) => a.wallet.localeCompare(b.wallet) || a.condition_id.localeCompare(b.condition_id)
+      || a.side.localeCompare(b.side) || String(a.outcome ?? "").localeCompare(String(b.outcome ?? ""))
+      || Date.parse(a.traded_at)-Date.parse(b.traded_at));
+  const signals: any[] = [];
+  let group: Trade[] = [];
+  const flush = () => {
+    if (!group.length) return;
+    const total = group.reduce((sum,t) => sum + t.usd_amount, 0);
+    if (total >= minimumUsd) {
+      const first = group[0], last = group[group.length-1];
+      const weightedPrice = total > 0 ? group.reduce((sum,t) => sum+t.price*t.usd_amount,0)/total : 0;
+      const bucket = Math.floor(Date.parse(first.traded_at)/windowMs);
+      signals.push({
+        dedupe_key: [first.wallet,first.condition_id,first.side,first.outcome ?? "unknown",bucket].join("|"),
+        wallet:first.wallet, market_id:first.market_id, condition_id:first.condition_id,
+        side:first.side, outcome:first.outcome,
+        trade_ids:group.map(t=>t.trade_id), total_usd:Math.round(total*100)/100,
+        price_min:Math.min(...group.map(t=>t.price)), price_avg:weightedPrice,
+        first_trade_at:first.traded_at, last_trade_at:last.traded_at,
+        updated_at:new Date().toISOString(),
+      });
+    }
+    group=[];
+  };
+  for (const trade of sorted) {
+    const previous=group[group.length-1];
+    const sameGroup=previous && previous.wallet===trade.wallet && previous.condition_id===trade.condition_id
+      && previous.side===trade.side && (previous.outcome ?? "")===(trade.outcome ?? "")
+      && Date.parse(trade.traded_at)-Date.parse(group[0].traded_at)<=windowMs;
+    if (!sameGroup) flush();
+    group.push(trade);
+  }
+  flush();
+  return signals;
+}
+
 function buildAlerts(trades: Trade[], settings: Settings, walletContext: Record<string, WalletContext>) {
   const groups = new Map<string, Trade[]>();
   for (const t of trades.filter(t => {
@@ -281,7 +323,7 @@ Deno.serve(async (req: Request) => {
   }
   if (startError || !scan) return new Response(JSON.stringify({ error: startError?.message ?? "Scan record missing" }), { status: 500, headers: cors });
 
-  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0;
+  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0, v2SignalCount = 0;
   let batchStart = 0;
   try {
     let { data: catalogue, error: catalogueError } = await db.from("markets")
@@ -328,6 +370,13 @@ Deno.serve(async (req: Request) => {
       });
       await Promise.all(workers);
       const unique = [...new Map(all.map(t => [t.trade_id,t])).values()]; fetched = unique.length;
+      const v2Signals = buildV2Signals(unique, settings);
+      for (let i=0; i<v2Signals.length; i+=100) {
+        const { data, error } = await db.from("scoring_v2_signals")
+          .upsert(v2Signals.slice(i,i+100), { onConflict:"dedupe_key" }).select("id");
+        if (error) errors.push(`Sauvegarde signaux V2 lot ${Math.floor(i/100)+1}: ${error.message}`);
+        else v2SignalCount += data?.length ?? 0;
+      }
       if (unique.length) {
         for (let i = 0; i < unique.length; i += 250) {
           const { data, error } = await db.from("trades")
@@ -391,8 +440,26 @@ Deno.serve(async (req: Request) => {
       }
     }
   } catch (e) { errors.push((e as Error).message); }
+  let v2ScoresUpdated = 0, v2SignalsScored = 0;
+  const { data: v2Checkpoint, error: v2CheckpointError } = await db.from("checkpoints")
+    .select("value").eq("key","scoring_v2_last_run").maybeSingle();
+  if (v2CheckpointError) errors.push(`Lecture du checkpoint V2: ${v2CheckpointError.message}`);
+  else if (!v2Checkpoint || Math.floor(Date.now()/1000)-Number(v2Checkpoint.value) >= 300) {
+    const [legacyV2, signalV2] = await Promise.all([
+      db.rpc("refresh_alert_scores_v2"),
+      db.rpc("refresh_scoring_v2_signals"),
+    ]);
+    if (legacyV2.error) errors.push(`Scoring V2 des alertes historiques: ${legacyV2.error.message}`);
+    else v2ScoresUpdated = Number(legacyV2.data ?? 0);
+    if (signalV2.error) errors.push(`Scoring des signaux V2: ${signalV2.error.message}`);
+    else v2SignalsScored = Number(signalV2.data ?? 0);
+    const { error: checkpointWriteError } = await db.from("checkpoints").upsert({
+      key:"scoring_v2_last_run", value:Math.floor(Date.now()/1000), updated_at:new Date().toISOString()
+    },{onConflict:"key"});
+    if (checkpointWriteError) errors.push(`Enregistrement du checkpoint V2: ${checkpointWriteError.message}`);
+  }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
-  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets } };
+  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
   const { error: finishError } = await db.from("scans").update({
     finished_at: new Date().toISOString(), ...result,
   }).eq("id", scan.id);
