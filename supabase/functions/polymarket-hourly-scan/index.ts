@@ -173,7 +173,7 @@ function buildV2Signals(trades: Trade[], settings: Settings) {
     const previous=group[group.length-1];
     const sameGroup=previous && previous.wallet===trade.wallet && previous.condition_id===trade.condition_id
       && previous.side===trade.side && (previous.outcome ?? "")===(trade.outcome ?? "")
-      && Date.parse(trade.traded_at)-Date.parse(group[0].traded_at)<=windowMs;
+      && Date.parse(trade.traded_at)-Date.parse(previous.traded_at)<=windowMs;
     if (!sameGroup) flush();
     group.push(trade);
   }
