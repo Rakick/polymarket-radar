@@ -151,6 +151,8 @@ function clamp(value: number, min = 0, max = 1) { return Math.max(min, Math.min(
 
 function buildV2Signals(trades: Trade[], settings: Settings) {
   const minimumUsd = Math.max(250, Number(settings.min_usd ?? 500));
+  // Regle produit : ne pas suivre les probabilites au-dessus de 60c (v2_max_price).
+  const maxPrice = Number((settings as any).v2_max_price ?? 0.6);
   const windowMs = Math.max(5, Number(settings.group_window_minutes ?? 30)) * 60_000;
   const sorted = trades
     .filter(t => Number.isFinite(t.usd_amount) && t.usd_amount > 0 && Number.isFinite(Date.parse(t.traded_at)))
@@ -162,9 +164,9 @@ function buildV2Signals(trades: Trade[], settings: Settings) {
   const flush = () => {
     if (!group.length) return;
     const total = group.reduce((sum,t) => sum + t.usd_amount, 0);
-    if (total >= minimumUsd) {
+    const weightedPrice = total > 0 ? group.reduce((sum,t) => sum+t.price*t.usd_amount,0)/total : 0;
+    if (total >= minimumUsd && weightedPrice <= maxPrice) {
       const first = group[0], last = group[group.length-1];
-      const weightedPrice = total > 0 ? group.reduce((sum,t) => sum+t.price*t.usd_amount,0)/total : 0;
       const bucket = Math.floor(Date.parse(first.traded_at)/windowMs);
       signals.push({
         dedupe_key: [first.wallet,first.condition_id,first.side,first.outcome ?? "unknown",bucket].join("|"),
