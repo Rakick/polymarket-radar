@@ -743,7 +743,7 @@ async function flushPendingTelegramDeliveries(alertId?: string, context?: any) {
       details.url || "",
       "",
       "Les six critères sont tous confirmés. Ceci est un signal d'analyse, pas une preuve de fraude.",
-    ].filter(Boolean).join("\\n");
+    ].filter(Boolean).join("\n");
     try {
       const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST", headers: { "content-type": "application/json" },
