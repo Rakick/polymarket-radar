@@ -683,6 +683,91 @@ async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; t
   return enqueued;
 }
 
+const REQUIRED_TELEGRAM_CONDITIONS = [
+  "buy_price_below_60c", "amount_at_least_2500", "account_age_at_most_7d",
+  "concentration_at_least_90", "relative_size_at_least_70", "score_at_least_80",
+];
+async function enqueueAndSendTelegramForAlert(dedupeKey: string) {
+  const { data: alert, error: alertError } = await db.from("alerts")
+    .select("id,wallet,market_id,outcome,total_usd,score,conditions")
+    .eq("dedupe_key", dedupeKey).maybeSingle();
+  if (alertError) throw alertError;
+  if (!alert) return;
+  const conditions = Array.isArray(alert.conditions) ? alert.conditions : [];
+  const byCode = new Map(conditions.map((condition: any) => [condition.code, condition.value]));
+  if (REQUIRED_TELEGRAM_CONDITIONS.some(code => byCode.get(code) !== true)) return;
+  const { data: connections, error: connectionsError } = await db.from("telegram_connections")
+    .select("chat_id").eq("enabled", true);
+  if (connectionsError) throw connectionsError;
+  if (!connections?.length) return;
+  const { data: market } = await db.from("markets").select("question,url").eq("id", alert.market_id).maybeSingle();
+  for (const connection of connections) {
+    const { error } = await db.from("telegram_notification_deliveries").upsert({
+      alert_id: alert.id, chat_id: connection.chat_id, status: "pending", updated_at: new Date().toISOString(),
+    }, { onConflict: "alert_id,chat_id", ignoreDuplicates: true });
+    if (error) throw error;
+  }
+  await flushPendingTelegramDeliveries(alert.id, {
+    wallet: alert.wallet, outcome: alert.outcome, totalUsd: Number(alert.total_usd),
+    score: alert.score, market: market?.question ?? "Marché Polymarket", url: market?.url ?? "",
+  });
+}
+async function flushPendingTelegramDeliveries(alertId?: string, context?: any) {
+  const token = Deno.env.get("TELEGRAM_BOT_TOKEN");
+  if (!token) return { sent: 0, skipped: true };
+  let query = db.from("telegram_notification_deliveries")
+    .select("id,alert_id,chat_id,attempts").eq("status", "pending")
+    .order("created_at", { ascending: true }).limit(20);
+  if (alertId) query = query.eq("alert_id", alertId);
+  const { data: pending, error } = await query;
+  if (error) throw error;
+  let sent = 0;
+  for (const delivery of pending ?? []) {
+    let details = context;
+    if (!details || delivery.alert_id !== alertId) {
+      const { data: alert } = await db.from("alerts").select("wallet,market_id,outcome,total_usd,score,conditions").eq("id", delivery.alert_id).maybeSingle();
+      if (!alert) continue;
+      const conditions = Array.isArray(alert.conditions) ? alert.conditions : [];
+      const byCode = new Map(conditions.map((condition: any) => [condition.code, condition.value]));
+      if (REQUIRED_TELEGRAM_CONDITIONS.some(code => byCode.get(code) !== true)) continue;
+      const { data: market } = await db.from("markets").select("question,url").eq("id", alert.market_id).maybeSingle();
+      details = { wallet: alert.wallet, outcome: alert.outcome, totalUsd: Number(alert.total_usd), score: alert.score, market: market?.question ?? "Marché Polymarket", url: market?.url ?? "" };
+    }
+    const message = [
+      "🚨 POLYMARKET RADAR — SIGNAL 6/6",
+      `Marché : ${details.market}`,
+      `Résultat : ${details.outcome ?? "Non renseigné"}`,
+      `Montant : ${Number(details.totalUsd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
+      `Score : ${details.score}/100`,
+      `Compte : ${details.wallet}`,
+      details.url || "",
+      "",
+      "Les six critères sont tous confirmés. Ceci est un signal d'analyse, pas une preuve de fraude.",
+    ].filter(Boolean).join("\\n");
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: delivery.chat_id, text: message, disable_web_page_preview: true }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) throw new Error(`Telegram HTTP ${response.status}`);
+      const { error: updateError } = await db.from("telegram_notification_deliveries")
+        .update({ status: "sent", sent_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_error: null })
+        .eq("id", delivery.id);
+      if (updateError) throw updateError;
+      sent++;
+    } catch (sendError) {
+      await db.from("telegram_notification_deliveries").update({
+        attempts: (Number(delivery.attempts) || 0) + 1,
+        last_error: (sendError as Error).message.slice(0, 500),
+        updated_at: new Date().toISOString(),
+      }).eq("id", delivery.id);
+      console.error("[telegram] delivery failed", delivery.id, (sendError as Error).message);
+    }
+  }
+  return { sent, skipped: false };
+}
+
 async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
   const { data, error } = await db.from("informed_buy_candidate_queue")
     .select("id,dedupe_key,candidate,attempts")
@@ -711,6 +796,7 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
 
       const existingId = await findExistingAlert(candidate);
       const result = await persistScoredAlert(candidate, localTrades, cache, existingId);
+      if (result.saved) await enqueueAndSendTelegramForAlert(candidate.dedupe_key);
       if (result.coverage > 0) {
         const { error: doneError } = await db.from("informed_buy_candidate_queue")
           .update({ status: "done", last_error: null, updated_at: new Date().toISOString() })
@@ -818,7 +904,8 @@ Deno.serve(async (req: Request) => {
   if (mode === "score-queue") {
     try {
       const liveQueue = await processQueuedCandidates(makeScoringCache(), 1);
-      return new Response(JSON.stringify({ status: "success", ...liveQueue }), { status: 200, headers: cors });
+      const telegram = await flushPendingTelegramDeliveries();
+      return new Response(JSON.stringify({ status: "success", ...liveQueue, telegram }), { status: 200, headers: cors });
     } catch (error) {
       console.error("[informed-scoring] live queue batch failed:", error);
       return new Response(JSON.stringify({ status: "failed", error: (error as Error).message }), { status: 500, headers: cors });
