@@ -545,12 +545,12 @@ async function persistScoredAlert(
 ): Promise<{ saved: boolean; deleted: boolean; score: number; coverage: number }> {
   const result = await scoreAlertCandidate(candidate, localTrades, cache);
   if (result.coverage === 0) return { saved: false, deleted: false, score: result.score, coverage: 0 };
-  if (result.score < DISPLAY_SCORE_MIN) {
-    if (existingId) {
-      const { error } = await db.from("alerts").delete().eq("id", existingId);
-      if (error) throw error;
-    }
-    return { saved: false, deleted: Boolean(existingId), score: result.score, coverage: result.coverage };
+  // Preserve historical alerts with their actual computed score, even below the
+  // display threshold. The API filters scores below DISPLAY_SCORE_MIN, while the
+  // database remains a complete analysis history. New low-scoring candidates are
+  // still omitted from the qualified alerts table.
+  if (result.score < DISPLAY_SCORE_MIN && !existingId) {
+    return { saved: false, deleted: false, score: result.score, coverage: result.coverage };
   }
 
   const payload: any = {
