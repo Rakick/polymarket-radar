@@ -960,7 +960,7 @@ Deno.serve(async (req: Request) => {
     }
   } catch (e) { errors.push((e as Error).message); }
   try {
-    const liveQueue = await processQueuedCandidates(scoringCache, 1);
+    const liveQueue = await processQueuedCandidates(scoringCache, 3);
     alertCount = liveQueue.saved;
     queueProcessed = liveQueue.completed;
     queueDeleted = liveQueue.deleted;
