@@ -1,0 +1,1 @@
+// Telegram pairing endpoint placeholder
