@@ -25,6 +25,10 @@ create table if not exists public.alerts(
  conditions jsonb not null default '{}'::jsonb,
  scored_at timestamptz,
  source_system text not null default 'legacy_v1',
+ scoring_attempts integer not null default 0,
+ score_last_attempt_at timestamptz,
+ score_retry_after timestamptz,
+ score_last_error text,
  created_at timestamptz not null default now(),
  updated_at timestamptz not null default now()
 );
@@ -36,6 +40,7 @@ create table if not exists public.informed_buy_candidate_queue(
  candidate jsonb not null,
  status text not null default 'pending' check(status in ('pending','done')),
  attempts integer not null default 0 check(attempts>=0),
+ next_attempt_at timestamptz not null default now(),
  last_error text,
  created_at timestamptz not null default now(),
  updated_at timestamptz not null default now()
@@ -47,3 +52,6 @@ revoke all on table public.informed_buy_candidate_queue from public,anon,authent
 grant select,insert,update,delete on table public.informed_buy_candidate_queue to service_role;
 create table if not exists public.scans(id uuid primary key default gen_random_uuid(),started_at timestamptz not null default now(),finished_at timestamptz,status text,window_start bigint,window_end bigint,markets_scanned int not null default 0,trades_fetched int not null default 0,trades_new int not null default 0,alerts_created int not null default 0,errors jsonb not null default '[]',details jsonb);
 create table if not exists public.checkpoints(key text primary key,value bigint not null,updated_at timestamptz not null default now());
+
+create index if not exists alerts_pending_retry_idx on public.alerts(score_retry_after,first_trade_at) where model_version is null;
+create index if not exists informed_buy_candidate_queue_ready_idx on public.informed_buy_candidate_queue(status,next_attempt_at,created_at) where status='pending';
