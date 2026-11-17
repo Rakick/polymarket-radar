@@ -592,7 +592,7 @@ async function findExistingAlert(candidate: AlertCandidate): Promise<string | un
   return match?.id;
 }
 
-async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
+async function rescorePendingAlerts(cache: ScoringCache, limit = 8) {
   const { data, error } = await db.from("alerts").select("*")
     .is("model_version", null)
     .or(`score_retry_after.is.null,score_retry_after.lt.${new Date().toISOString()}`)
@@ -846,7 +846,7 @@ Deno.serve(async (req: Request) => {
   const mode = new URL(req.url).searchParams.get("mode");
   if (mode === "backfill") {
     try {
-      const backfill = await rescorePendingAlerts(makeScoringCache(), 2);
+      const backfill = await rescorePendingAlerts(makeScoringCache(), 8);
       return new Response(JSON.stringify({ status: "success", ...backfill }), { status: 200, headers: cors });
     } catch (error) {
       console.error("[informed-scoring] backfill batch failed:", error);
