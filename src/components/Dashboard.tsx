@@ -107,6 +107,7 @@ export default function Dashboard() {
         <div className="sidebar-label">WORKSPACE</div>
         <a className="nav-item active" href="/"><span>⌂</span> Surveillance active <b>{alerts.length}</b></a>
         <a className="nav-item" href="/statistics"><span>▥</span> Statistiques & méthode</a>
+        <a className="nav-item" href="/settings"><span>⚙</span> Notifications</a>
         <div className="sidebar-bottom">
           <div className="system-card"><span className="status-dot" /> <span><strong>Scanner actif</strong><small>Synchronisation automatique</small></span></div>
           <button className="logout-button" onClick={() => browserClient().auth.signOut()}>↗ Déconnexion</button>
