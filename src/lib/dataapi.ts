@@ -61,15 +61,15 @@ export async function fetchTradesForMarket(options: {
   takerOnly?: boolean;
 }) {
   const out: Trade[] = [];
-  const maxPages = options.maxPages ?? 10;
+  const maxPages = options.maxPages ?? 20;
+  const seenCursors = new Set<string>();
   let cursor: string | undefined;
-  let truncated = false;
 
   for (let page = 0; page < maxPages; page++) {
+    // For condition-shaped feeds, Polymarket ignores start/end and serves a fixed
+    // three-year window. Keep filters identical while walking the opaque keyset cursor.
     const query = new URLSearchParams({
       condition: options.condition,
-      start: String(Math.max(0, options.startSec)),
-      end: String(options.endSec),
       limit: "500",
       taker_only: String(options.takerOnly ?? true),
     });
@@ -79,19 +79,42 @@ export async function fetchTradesForMarket(options: {
     try {
       response = await fetchJson<TradesPage>(`https://data-api.polymarket.com/v2/trades?${query}`);
     } catch (error) {
-      return { trades: out, truncated: true, error: (error as Error).message };
+      return { trades: out, pages: page + 1, truncated: true, error: (error as Error).message };
     }
 
+    let oldestTimestamp = Number.POSITIVE_INFINITY;
     for (const rawTrade of response.data ?? []) {
+      const timestamp = Number(rawTrade.timestamp);
+      if (Number.isFinite(timestamp)) oldestTimestamp = Math.min(oldestTimestamp, timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < options.startSec || timestamp > options.endSec) continue;
       const trade = normalizeTrade(rawTrade, options.marketId);
       if (trade) out.push(trade);
     }
 
+    // The feed is ordered newest-to-oldest: once a page crosses the lower time
+    // boundary, no subsequent cursor page can contain a trade from this scan window.
+    if (oldestTimestamp < options.startSec) {
+      return { trades: out, pages: page + 1, truncated: false };
+    }
+
     const hasMore = response.pagination?.has_more === true;
-    cursor = response.pagination?.next_cursor ?? undefined;
-    if (!cursor || !hasMore) break;
-    if (page === maxPages - 1) truncated = true;
+    const nextCursor = response.pagination?.next_cursor;
+    if (!hasMore) return { trades: out, pages: page + 1, truncated: false };
+    if (typeof nextCursor !== "string" || !nextCursor) {
+      return { trades: out, pages: page + 1, truncated: true, error: "Pagination incohérente : has_more=true sans next_cursor" };
+    }
+    if (seenCursors.has(nextCursor)) {
+      return { trades: out, pages: page + 1, truncated: true, error: "Pagination bloquée : curseur répété" };
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
   }
 
-  return { trades: out, truncated };
+  return {
+    trades: out,
+    pages: maxPages,
+    truncated: true,
+    error: `Plafond de sécurité atteint après ${maxPages} pages avant la fin de la fenêtre`,
+  };
 }
