@@ -217,6 +217,88 @@ function makeScoringCache(): ScoringCache {
   return { users: new Map(), markets: new Map() };
 }
 
+function parseHistoryTrade(row: any): HistoryTrade | null {
+  const wallet = String(row?.proxy_wallet ?? row?.wallet ?? "").toLowerCase();
+  const condition = String(row?.condition_id ?? row?.conditionId ?? "");
+  const transactionHash = String(row?.transaction_hash ?? "");
+  const timestamp = Number(row?.timestamp);
+  const price = Number(row?.price);
+  const size = Number(row?.size);
+  const side = String(row?.side ?? "").toUpperCase();
+  if (!wallet || !condition || !transactionHash || !Number.isFinite(timestamp)
+    || !Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0
+    || (side !== "BUY" && side !== "SELL")) return null;
+  return {
+    trade_id: "", transaction_hash: transactionHash, wallet, side: side as "BUY" | "SELL",
+    condition_id: condition, outcome: row?.outcome == null ? null : String(row.outcome),
+    price, size, usd_amount: Math.round(price * size * 100) / 100,
+    traded_at: new Date(timestamp * 1000).toISOString(), timestamp,
+  };
+}
+
+async function fetchTradeHistory(params: Record<string, string>, stopBeforeMs?: number): Promise<HistoryResult> {
+  const trades: HistoryTrade[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < HISTORY_MAX_PAGES; page++) {
+    const query = new URLSearchParams({ ...params, limit: String(HISTORY_PAGE_SIZE) });
+    if (cursor) query.set("cursor", cursor);
+    let payload: any;
+    try {
+      payload = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${query}`);
+    } catch (error) {
+      return { trades, complete: false, error: (error as Error).message };
+    }
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+      const parsed = parseHistoryTrade(row);
+      if (!parsed) continue;
+      oldest = Math.min(oldest, parsed.timestamp * 1000);
+      const walletInput = String(row?.proxy_wallet ?? row?.wallet ?? "");
+      const tokenId = row?.token_id ?? "";
+      const idInput = [parsed.transaction_hash, walletInput, tokenId, row?.side, row.size, row.price, parsed.timestamp].join("|");
+      const uniqueKey = `${idInput}|${parsed.outcome ?? ""}`;
+      if (seen.has(uniqueKey)) continue;
+      seen.add(uniqueKey);
+      trades.push(parsed);
+    }
+    if (stopBeforeMs != null && oldest < stopBeforeMs) return { trades, complete: true };
+    const hasMore = payload?.pagination?.has_more === true;
+    const nextCursor = payload?.pagination?.next_cursor;
+    if (!hasMore) return { trades, complete: true };
+    if (typeof nextCursor !== "string" || !nextCursor || nextCursor === cursor) {
+      return { trades, complete: false, error: "Pagination Polymarket incomplète ou curseur répété" };
+    }
+    cursor = nextCursor;
+  }
+  return { trades, complete: false, error: `Plafond de sécurité atteint après ${HISTORY_MAX_PAGES} pages` };
+}
+
+function getUserHistory(wallet: string, cache: ScoringCache): Promise<HistoryResult> {
+  const key = wallet.toLowerCase();
+  if (!cache.users.has(key)) {
+    const end = Math.floor(Date.now() / 1000);
+    // No side filter: account age must include the first BUY or SELL activity.
+    cache.users.set(key, fetchTradeHistory({
+      user: key, start: "1", end: String(end),
+      taker_only: "false", filter_type: "CASH", filter_amount: "0",
+    }));
+  }
+  return cache.users.get(key)!;
+}
+
+function getMarketHistory(condition: string, eventTimeMs: number, cache: ScoringCache): Promise<HistoryResult> {
+  const key = `${condition.toLowerCase()}:${Math.floor(eventTimeMs / 1000)}`;
+  if (!cache.markets.has(key)) {
+    cache.markets.set(key, fetchTradeHistory({
+      condition, side: "BUY", taker_only: "false",
+      filter_type: "CASH", filter_amount: "0",
+    }, eventTimeMs - 30 * DAY_MS));
+  }
+  return cache.markets.get(key)!;
+}
+
 function normalizedOutcome(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase();
 }
