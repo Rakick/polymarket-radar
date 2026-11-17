@@ -295,7 +295,8 @@ function getUserHistory(wallet: string, cache: ScoringCache): Promise<HistoryRes
   if (!cache.users.has(key)) {
     const end = Math.floor(Date.now() / 1000);
     cache.users.set(key, fetchTradeHistory({
-      user: key, side: "BUY", start: "1", end: String(end),
+      // Fetch both BUY and SELL: the first observed activity can be either side.
+      user: key, start: "1", end: String(end),
       taker_only: "false", filter_type: "CASH", filter_amount: "0",
     }));
   }
@@ -416,9 +417,8 @@ async function scoreAlertCandidate(
   const eventTime = Date.parse(candidate.first_trade_at);
   const marketHistoryPromise = getMarketHistory(candidate.condition_id, eventTime, cache);
   const userHistoryPromise = getUserHistory(candidate.wallet, cache);
-  const joinDatePromise = getVerifiedJoinDate(candidate.wallet, cache);
-  const [marketHistory, userHistory, joinDate] = await Promise.all([
-    marketHistoryPromise, userHistoryPromise, joinDatePromise,
+  const [marketHistory, userHistory] = await Promise.all([
+    marketHistoryPromise, userHistoryPromise,
   ]);
   const eventTrades = historicalRowsForCandidate(candidate, localTrades, marketHistory.trades);
   const expectedTradeIds = new Set(candidate.trade_ids ?? []);
@@ -435,10 +435,13 @@ async function scoreAlertCandidate(
   const price = eventAmountIsComplete ? exactEventWeightedPrice : candidate.price_avg;
   const eventEpoch = Math.floor(eventTime / 1000);
 
+  // Account age is measured from the earliest activity we can verify in the
+  // complete Polymarket trade history, up to now (not up to the alert timestamp).
+  // A partial history must not be presented as a reliable account age.
   let accountAgeDays: number | null = null;
-  if (joinDate) {
-    const createdAt = Date.parse(joinDate);
-    const age = (eventTime - createdAt) / DAY_MS;
+  if (userHistory.complete && userHistory.trades.length > 0) {
+    const firstActivity = Math.min(...userHistory.trades.map(trade => trade.timestamp));
+    const age = (Date.now() / 1000 - firstActivity) / (24 * 60 * 60);
     if (Number.isFinite(age) && age >= 0) accountAgeDays = age;
   }
 
