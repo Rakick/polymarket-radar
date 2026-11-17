@@ -174,7 +174,7 @@ export default function Dashboard() {
 
                   <div className="detail-section">
                     <div className="subheading-row"><h4>Six critères de vérification</h4><span>Information — aucun critère ne bloque l’alerte</span></div>
-                    <div className="factor-list">{(alert.conditions ?? []).map(condition => <div className="factor-row" key={condition.code}><span className="factor-dot factor-dot-v2" /><div><strong>{condition.label}</strong><small>{condition.detail}</small></div><b className={condition.value === true ? "condition-yes" : condition.value === false ? "condition-no" : "condition-unknown"}>{condition.value === true ? "Oui" : condition.value === false ? "Non" : "Inconnu"}</b></div>)}</div>
+                    <div className="factor-list">{(alert.conditions ?? []).map(condition => <div className="factor-row" key={condition.code}><span className="factor-dot factor-dot-v2" /><div><strong>{condition.label}</strong><small>{condition.detail}</small></div><b className={condition.value === true ? "condition-yes" : condition.value === false ? "condition-no" : "condition-unknown"}>{condition.value === true ? "✅" : condition.value === false ? "❌" : "⚪"}</b></div>)}</div>
                   </div>
 
                   <div className="detail-section"><div className="subheading-row"><h4>Transactions associées</h4><span>{alert.trades?.length ?? 0} chargée(s) / {alert.trade_ids?.length ?? 0} référencée(s)</span></div>
