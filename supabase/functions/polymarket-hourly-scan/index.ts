@@ -854,9 +854,20 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // Live scoring runs independently from market ingestion to keep the scan under the Edge CPU budget.
+  if (mode === "score-queue") {
+    try {
+      const liveQueue = await processQueuedCandidates(makeScoringCache(), 1);
+      return new Response(JSON.stringify({ status: "success", ...liveQueue }), { status: 200, headers: cors });
+    } catch (error) {
+      console.error("[informed-scoring] live queue batch failed:", error);
+      return new Response(JSON.stringify({ status: "failed", error: (error as Error).message }), { status: 500, headers: cors });
+    }
+  }
+
   await db.from("scans").update({
     status: "failed", finished_at: new Date().toISOString(),
-    errors: ["Exécution interrompue après expiration du verrou de scan (5 minutes)."]
+    errors: ["Exécution interrompue après expiration du verrou de scan (2 minutes)."]
   }).eq("status", "running").lt("started_at", new Date(Date.now() - 2 * 60 * 1000).toISOString());
 
   const { data: settingRow, error: settingsError } = await db.from("app_settings").select("data").eq("id", 1).single();
@@ -881,9 +892,8 @@ Deno.serve(async (req: Request) => {
   }
   if (startError || !scan) return new Response(JSON.stringify({ error: startError?.message ?? "Scan record missing" }), { status: 500, headers: cors });
 
-  const scoringCache = makeScoringCache();
-  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0;
-  let queueEnqueued = 0, queueProcessed = 0, queueDeleted = 0, queuePending = 0;
+  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, targetMarkets = 0;
+  let queueEnqueued = 0;
   let batchStart = 0;
   let resolvedMarketsUpdated = 0;
   let tradePagesFetched = 0;
@@ -971,20 +981,10 @@ Deno.serve(async (req: Request) => {
       queueEnqueued = await enqueueAlertCandidates(candidates);
     }
   } catch (e) { errors.push((e as Error).message); }
-  try {
-    const liveQueue = await processQueuedCandidates(scoringCache, 3);
-    alertCount = liveQueue.saved;
-    queueProcessed = liveQueue.completed;
-    queueDeleted = liveQueue.deleted;
-    queuePending = liveQueue.pending;
-  } catch (error) {
-    errors.push(`File des nouveaux candidats BUY: ${(error as Error).message}`);
-  }
-
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
   const result = {
     status, window_start: start, window_end: end,
-    markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors,
+    markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: 0, errors,
     details: {
       batch_start: batchStart, batch_size: batchSize, total_markets: targetMarkets,
       trade_page_size: TRADE_PAGE_SIZE, trade_pages_fetched: tradePagesFetched,
@@ -992,8 +992,6 @@ Deno.serve(async (req: Request) => {
       min_market_volume: minMarketVolume, min_market_liquidity: minMarketLiquidity,
       resolved_markets_updated: resolvedMarketsUpdated,
       scoring_model: MODEL_VERSION, queued_live_candidates: queueEnqueued,
-      live_candidates_processed: queueProcessed, live_candidates_deleted_below_50: queueDeleted,
-      live_candidates_pending: queuePending,
     },
   };
   const { error: finishError } = await db.from("scans").update({
