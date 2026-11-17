@@ -80,8 +80,9 @@ export function simultaneitySubscore(
   currentOtherWallets: number,
   historicalWindows: number[] | null,
 ): number | null {
-  if (!historicalWindows || historicalWindows.length < 100) return null;
+  // N < 2 is always a zero subscore; it does not require percentile history.
   if (currentOtherWallets < 2) return 0;
+  if (!historicalWindows || historicalWindows.length < 100) return null;
   const finite = historicalWindows.filter(Number.isFinite);
   if (finite.length < 100) return null;
   const percentile = finite.filter(value => value <= currentOtherWallets).length / finite.length;

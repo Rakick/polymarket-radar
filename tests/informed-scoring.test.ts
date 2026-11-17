@@ -29,6 +29,7 @@ describe("informed buy scoring", () => {
   it("requires 100 historical windows and forces zero when fewer than two peers are present", () => {
     expect(simultaneitySubscore(4, Array(99).fill(0))).toBeNull();
     expect(simultaneitySubscore(1, Array(100).fill(0))).toBe(0);
+    expect(simultaneitySubscore(1, null)).toBe(0);
     expect(simultaneitySubscore(4, [...Array(99).fill(0), 4])).toBe(100);
   });
 

@@ -47,8 +47,10 @@ export function relativeSizeScore(amount: number, comparables: number[] | null):
   return 100 * clamp((z - 1) / 3);
 }
 export function simultaneityScore(current: number, historical: number[] | null): number | null {
-  if (!historical || historical.length < 100) return null;
+  // The model explicitly assigns zero when fewer than two other wallets qualify,
+  // even when a historical percentile baseline is not yet available.
   if (current < 2) return 0;
+  if (!historical || historical.length < 100) return null;
   const values = historical.filter(Number.isFinite);
   if (values.length < 100) return null;
   const percentile = values.filter(value => value <= current).length / values.length;

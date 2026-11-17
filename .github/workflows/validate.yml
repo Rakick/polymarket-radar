@@ -1,0 +1,21 @@
+name: Validate
+on:
+  pull_request:
+  push:
+    branches: [main, 'fix/**']
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run test
+      - run: npm run build
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno check --node-modules-dir=none supabase/functions/polymarket-hourly-scan/index.ts

@@ -1,2 +1,6 @@
-import { runScan } from "../src/lib/scan";
-runScan().then((r) => { console.log(JSON.stringify(r, null, 2)); process.exit(r.status === "failed" ? 1 : 0); }).catch((e) => { console.error("Scan en echec :", e); process.exit(1); });
+// The former local scan runner invoked the retired V1/V2 scoring pipeline.
+// Production scanning is now owned by the polymarket-hourly-scan Supabase Edge Function.
+console.error(
+  "Le scanner local historique est désactivé. Le scanner BUY unifié est exécuté par Supabase Edge Functions.",
+);
+process.exit(1);
