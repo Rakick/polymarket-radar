@@ -54,7 +54,7 @@ function tagsMatch(m: any, categories: string[]) {
 }
 function parseArray(s?: string) { try { const v = s ? JSON.parse(s) : []; return Array.isArray(v) ? v : []; } catch { return []; } }
 
-async function getMarkets(categories: string[]) {
+async function getMarkets(categories: string[], caps: { perCategory: number; total: number }) {
   const markets: any[] = [], errors: string[] = [];
   const seen = new Set<string>();
   for (const category of categories) {
@@ -63,7 +63,7 @@ async function getMarkets(categories: string[]) {
     try { tag = await fetchJson<any>(`https://gamma-api.polymarket.com/tags/slug/${encodeURIComponent(category)}`); }
     catch (e) { errors.push(`Tag ${category}: ${(e as Error).message}`); continue; }
     if (!tag?.id) { errors.push(`Tag introuvable: ${category}`); continue; }
-    for (let page = 0; page < 5 && markets.length - categoryStartCount < 125 && markets.length < 500; page++) {
+    for (let page = 0; page < 10 && markets.length - categoryStartCount < caps.perCategory && markets.length < caps.total; page++) {
       const offset = page * 100;
       let batch: any[];
       try {
@@ -86,7 +86,7 @@ async function getMarkets(categories: string[]) {
           outcomes: parseArray(m.outcomes), outcome_prices: parseArray(m.outcomePrices).map(Number),
           closed: false, accepting_orders: true, updated_at: new Date().toISOString(),
         });
-        if (markets.length - categoryStartCount >= 125 || markets.length >= 500) break;
+        if (markets.length - categoryStartCount >= caps.perCategory || markets.length >= caps.total) break;
       }
       if (batch.length < 100) break;
     }
@@ -365,6 +365,17 @@ Deno.serve(async (req: Request) => {
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
   const raw = (settingRow?.data ?? {}) as Partial<Settings>;
   const settings: Settings = { ...defaults, ...raw, weights: { ...defaults.weights, ...(raw.weights ?? {}) } };
+  // Capacite de scan, parametrable via app_settings :
+  // - caps.perCategory / caps.total : plafonds du catalogue (300 / 1500)
+  // - batchSize : marches scannes par passage (15)
+  // - minMarketVolume / minMarketLiquidity : filtre qualite amont (50k / 10k)
+  const caps = {
+    perCategory: Number((settings as any).max_markets_per_category ?? 300),
+    total: Number((settings as any).max_markets_total ?? 1500),
+  };
+  const batchSize = Math.max(1, Number((settings as any).scan_batch_size ?? 15));
+  const minMarketVolume = Number((settings as any).min_market_volume ?? 50000);
+  const minMarketLiquidity = Number((settings as any).min_market_liquidity ?? 10000);
   const end = Math.floor(Date.now()/1000), start = end - 3600 - settings.scan_overlap_seconds;
   const { data: scan, error: startError } = await db.from("scans").insert({
     started_at: new Date().toISOString(), status: "running", window_start: start, window_end: end,
@@ -382,16 +393,16 @@ Deno.serve(async (req: Request) => {
     resolvedMarketsUpdated = resolutionSync.updated;
     errors.push(...resolutionSync.errors);
     let { data: catalogue, error: catalogueError } = await db.from("markets")
-      .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category")
+      .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
       .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
-      .order("id", { ascending: true }).limit(1000);
+      .order("volume", { ascending: false, nullsLast: true }).limit(2000);
     if (catalogueError) throw new Error(`Lecture du catalogue: ${catalogueError.message}`);
     const latest = (catalogue ?? []).reduce((max, m) => Math.max(max, Date.parse(m.updated_at ?? "1970-01-01")), 0);
     const presentCategories = new Set((catalogue ?? []).map(m => m.category));
     const missingCategory = settings.categories.some(category => !presentCategories.has(category));
     const needsRefresh = !catalogue?.length || missingCategory || Date.now() - latest > 55 * 60 * 1000;
     if (needsRefresh) {
-      const gamma = await getMarkets(settings.categories);
+      const gamma = await getMarkets(settings.categories, caps);
       errors.push(...gamma.errors);
       for (let i=0; i<gamma.markets.length; i+=100) {
         const { error } = await db.from("markets").upsert(gamma.markets.slice(i,i+100), { onConflict: "id" });
@@ -399,13 +410,17 @@ Deno.serve(async (req: Request) => {
       }
       catalogue = gamma.markets;
     }
-    catalogue = (catalogue ?? []).filter(m => !m.end_date || Date.parse(m.end_date) > Date.now()).slice(0,500);
+    // Priorisation par volume (proxy d'activite) + filtre qualite amont.
+    catalogue = (catalogue ?? [])
+      .filter(m => !m.end_date || Date.parse(m.end_date) > Date.now())
+      .filter(m => (Number(m.volume) || 0) >= minMarketVolume && (Number(m.liquidity) || 0) >= minMarketLiquidity)
+      .slice(0, caps.total);
     targetMarkets = catalogue.length;
     if (targetMarkets > 0) {
       const { data: checkpoint } = await db.from("checkpoints").select("value").eq("key", "trades_checkpoint").maybeSingle();
       batchStart = Number(checkpoint?.value ?? 0);
       if (!Number.isFinite(batchStart) || batchStart < 0 || batchStart >= targetMarkets) batchStart = 0;
-      const markets = catalogue.slice(batchStart, batchStart + 5);
+      const markets = catalogue.slice(batchStart, batchStart + batchSize);
       const nextOffset = (batchStart + markets.length) % targetMarkets;
       const { error: checkpointError } = await db.from("checkpoints").upsert({
         key: "trades_checkpoint", value: nextOffset, updated_at: new Date().toISOString()
@@ -413,7 +428,7 @@ Deno.serve(async (req: Request) => {
       if (checkpointError) errors.push(`Mise à jour du checkpoint: ${checkpointError.message}`);
       const all: Trade[] = [];
       let next = 0;
-      const workers = Array.from({ length: Math.min(5, markets.length) }, async () => {
+      const workers = Array.from({ length: Math.min(8, markets.length) }, async () => {
         while (next < markets.length) {
           const market = markets[next++];
           const result = await getTrades(market, start, end);
@@ -514,7 +529,7 @@ Deno.serve(async (req: Request) => {
     if (checkpointWriteError) errors.push(`Enregistrement du checkpoint V2: ${checkpointWriteError.message}`);
   }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
-  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: 5, total_markets: targetMarkets, resolved_markets_updated: resolvedMarketsUpdated, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
+  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: batchSize, total_markets: targetMarkets, resolved_markets_updated: resolvedMarketsUpdated, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
   const { error: finishError } = await db.from("scans").update({
     finished_at: new Date().toISOString(), ...result,
   }).eq("id", scan.id);
