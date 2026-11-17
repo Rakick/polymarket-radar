@@ -879,7 +879,7 @@ Deno.serve(async (req: Request) => {
     perCategory: Math.min(300, Math.max(50, Math.floor(Number((settings as any).max_markets_per_category ?? 300)))),
     total: Math.min(1500, Math.max(100, Math.floor(Number((settings as any).max_markets_total ?? 1500)))),
   };
-  const batchSize = Math.min(5, Math.max(1, Math.floor(Number((settings as any).scan_batch_size ?? 5))));
+  const batchSize = Math.min(15, Math.max(1, Math.floor(Number((settings as any).scan_batch_size ?? 15))));
   // Quality thresholds intentionally broadened to include more active, still-tradable markets.
   const minMarketVolume = Math.max(0, Number((settings as any).min_market_volume ?? 20000));
   const minMarketLiquidity = Math.max(0, Number((settings as any).min_market_liquidity ?? 2000));
