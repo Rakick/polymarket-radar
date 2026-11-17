@@ -9,7 +9,7 @@ type Alert = {
   id: string; score: number; coverage: number; total_usd: number; alert_type: string;
   model_version: string | null; created_at: string; first_trade_at: string | null;
   market: { category: string | null; question: string } | null; factors: Factor[];
-  missing_data: string[]; conditions: { value: boolean | null }[];
+  missing_data: string[]; conditions: { value: boolean | null }[]; result: "true" | "false" | null;
 };
 
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(n);
@@ -63,6 +63,8 @@ export default function StatisticsDashboard() {
     });
     return {
       count, avgScore, avgCoverage, totalUsd,
+      trueCount: alerts.filter(a => a.result === "true").length,
+      falseCount: alerts.filter(a => a.result === "false").length,
       priority: alerts.filter(a => a.score >= 90).length,
       grouped: alerts.filter(a => a.alert_type === "grouped").length,
       categories: [...categories.entries()].sort((a,b) => b[1]-a[1]).slice(0,8),
@@ -104,6 +106,16 @@ export default function StatisticsDashboard() {
           <article className="stats-intro-card"><span className="eyebrow">PÉRIMÈTRE ANALYSÉ</span><strong>{loading ? "—" : fmt(analytics.count)}</strong><p>Alertes BUY qualifiées chargées depuis l’historique récent.</p></article>
           <article className="stats-intro-card"><span className="eyebrow">PÉRIODE COUVERTE</span><strong className="stats-date">{loading || !analytics.firstDate ? "—" : new Date(analytics.firstDate).toLocaleDateString("fr-FR") + " → " + new Date(analytics.lastDate!).toLocaleDateString("fr-FR")}</strong><p>Dates des premières transactions présentes dans cet échantillon.</p></article>
           <article className="stats-intro-card"><span className="eyebrow">VOLUME ASSOCIÉ</span><strong>{loading ? "—" : usd(analytics.totalUsd)}</strong><p>Somme des montants agrégés des alertes affichées.</p></article>
+        </section>
+
+        <section className="stats-panel">
+          <div className="section-heading"><div><span className="eyebrow">ALERT OUTCOMES</span><h2>Résultats des alertes</h2><p>Une alerte est considérée vraie ou fausse uniquement lorsque le marché associé est clôturé et que son issue est déterminée.</p></div></div>
+          <div className="stats-kpi-grid" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+            <article><span>Alertes au total</span><strong>{loading ? "—" : fmt(analytics.count)}</strong></article>
+            <article><span>Alertes vraies · issue gagnante</span><strong>{loading ? "—" : fmt(analytics.trueCount)}</strong></article>
+            <article><span>Alertes fausses · issue perdante</span><strong>{loading ? "—" : fmt(analytics.falseCount)}</strong></article>
+          </div>
+          <div className="stats-note">Les marchés non clôturés ou dont le résultat n’est pas encore certain ne sont comptés ni comme vrais ni comme faux.</div>
         </section>
 
         <section className="stats-panel">
