@@ -80,7 +80,7 @@ async function getMarkets(categories: string[], caps: { perCategory: number; tot
       const offset = page * 100;
       let batch: any[];
       try {
-        batch = await fetchJson<any[]>(`https://gamma-api.polymarket.com/markets?tag_id=${encodeURIComponent(String(tag.id))}&active=true&closed=false&limit=100&offset=${offset}`);
+        batch = await fetchJson<any[]>(`https://gamma-api.polymarket.com/markets?tag_id=${encodeURIComponent(String(tag.id))}&active=true&closed=false&order=volumeNum&ascending=false&limit=100&offset=${offset}`);
       } catch (e) { errors.push(`Markets ${category} offset=${offset}: ${(e as Error).message}`); break; }
       if (!batch.length) break;
       for (const m of batch) {
