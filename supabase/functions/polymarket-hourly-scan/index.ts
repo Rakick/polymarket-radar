@@ -218,6 +218,14 @@ function makeScoringCache(): ScoringCache {
   return { users: new Map(), markets: new Map(), joinDates: new Map() };
 }
 
+async function getPolymarketJoinDate(wallet: string): Promise<string | null> {
+  const profile = await fetchJson<any>(`https://data-api.polymarket.com/v2/user-stats?user=${encodeURIComponent(wallet)}`);
+  const seconds = Number(profile?.data?.join_date);
+  return Number.isFinite(seconds) && seconds > 0
+    ? new Date(seconds * 1000).toISOString()
+    : null;
+}
+
 function parseHistoryTrade(row: any): HistoryTrade | null {
   const wallet = String(row?.proxy_wallet ?? row?.wallet ?? "").toLowerCase();
   const condition = String(row?.condition_id ?? row?.conditionId ?? "");
@@ -256,8 +264,9 @@ async function fetchTradeHistory(params: Record<string, string>, stopBeforeMs?: 
       const parsed = parseHistoryTrade(row);
       if (!parsed) continue;
       oldest = Math.min(oldest, parsed.timestamp * 1000);
-      const tokenId = row?.asset ?? row?.token_id ?? "";
-      const idInput = [parsed.transaction_hash, parsed.wallet, tokenId, parsed.side, row.size, row.price, parsed.timestamp].join("|");
+      const walletInput = String(row?.proxy_wallet ?? row?.wallet ?? "");
+      const tokenId = row?.token_id ?? "";
+      const idInput = [parsed.transaction_hash, walletInput, tokenId, row?.side, row.size, row.price, parsed.timestamp].join("|");
       const uniqueKey = `${idInput}|${parsed.outcome ?? ""}`;
       if (seen.has(uniqueKey)) continue;
       seen.add(uniqueKey);
