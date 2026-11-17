@@ -7,7 +7,7 @@ import MonitoringPanel from "@/components/MonitoringPanel";
 type Factor = { code: string; label: string; weight: number; available: boolean; contribution: number; subscore: number | null };
 type Alert = {
   id: string; score: number; coverage: number; total_usd: number; alert_type: string;
-  model_version: string | null; created_at: string; first_trade_at: string | null;
+  model_version: string | null; created_at: string; first_trade_at: string | null; result: boolean | null;
   market: { category: string | null; question: string } | null; factors: Factor[];
   missing_data: string[]; conditions: { value: boolean | null }[];
 };
@@ -63,6 +63,9 @@ export default function StatisticsDashboard() {
     });
     return {
       count, avgScore, avgCoverage, totalUsd,
+      trueResults: alerts.filter(a => a.result === true).length,
+      falseResults: alerts.filter(a => a.result === false).length,
+      pendingResults: alerts.filter(a => a.result == null).length,
       priority: alerts.filter(a => a.score >= 90).length,
       grouped: alerts.filter(a => a.alert_type === "grouped").length,
       categories: [...categories.entries()].sort((a,b) => b[1]-a[1]).slice(0,8),
@@ -104,6 +107,17 @@ export default function StatisticsDashboard() {
           <article className="stats-intro-card"><span className="eyebrow">PÉRIMÈTRE ANALYSÉ</span><strong>{loading ? "—" : fmt(analytics.count)}</strong><p>Alertes BUY qualifiées chargées depuis l’historique récent.</p></article>
           <article className="stats-intro-card"><span className="eyebrow">PÉRIODE COUVERTE</span><strong className="stats-date">{loading || !analytics.firstDate ? "—" : new Date(analytics.firstDate).toLocaleDateString("fr-FR") + " → " + new Date(analytics.lastDate!).toLocaleDateString("fr-FR")}</strong><p>Dates des premières transactions présentes dans cet échantillon.</p></article>
           <article className="stats-intro-card"><span className="eyebrow">VOLUME ASSOCIÉ</span><strong>{loading ? "—" : usd(analytics.totalUsd)}</strong><p>Somme des montants agrégés des alertes affichées.</p></article>
+        </section>
+
+        <section className="stats-panel">
+          <div className="section-heading"><div><span className="eyebrow">ALERT OUTCOMES</span><h2>Résultats des alertes</h2><p>Classement des alertes selon le résultat final du marché. Les marchés non clôturés ou dont l’issue ne peut pas être rapprochée restent non résolus.</p></div></div>
+          <div className="stats-kpi-grid">
+            <article><span>Total des alertes</span><strong>{loading ? "—" : fmt(analytics.count)}</strong></article>
+            <article><span>Alertes vraies · gagnantes</span><strong>{loading ? "—" : fmt(analytics.trueResults)}</strong></article>
+            <article><span>Alertes fausses · perdantes</span><strong>{loading ? "—" : fmt(analytics.falseResults)}</strong></article>
+            <article><span>Non résolues</span><strong>{loading ? "—" : fmt(analytics.pendingResults)}</strong></article>
+          </div>
+          <div className="stats-note">Le total correspond aux alertes qualifiées chargées (maximum 500). Une alerte n’est classée qu’après clôture du marché et identification de l’issue achetée.</div>
         </section>
 
         <section className="stats-panel">
