@@ -270,7 +270,9 @@ async function fetchTradeHistory(params: Record<string, string>, stopBeforeMs?: 
       const uniqueKey = `${idInput}|${parsed.outcome ?? ""}`;
       if (seen.has(uniqueKey)) continue;
       seen.add(uniqueKey);
-      parsed.trade_id = await hash(idInput);
+      // Hashes are only needed for live fills persisted in public.trades.
+      // Historical rows feed aggregates and distributions; hashing every row
+      // across up to 40,000 API results exhausted the Edge Function CPU budget.
       trades.push(parsed);
     }
 
@@ -396,21 +398,14 @@ function buildAlertCandidates(trades: Trade[], windowMinutes: number): Array<{ r
   return result;
 }
 
-function historicalRowsForCandidate(candidate: AlertCandidate, localTrades: Trade[], marketHistory: HistoryTrade[]): HistoryTrade[] {
-  const start = Date.parse(candidate.first_trade_at) - 1000;
-  const end = Date.parse(candidate.last_trade_at) + 1000;
-  const local: HistoryTrade[] = localTrades.map(trade => ({
-    ...trade, timestamp: Math.floor(Date.parse(trade.traded_at) / 1000),
+function historicalRowsForCandidate(_candidate: AlertCandidate, localTrades: Trade[], _marketHistory: HistoryTrade[]): HistoryTrade[] {
+  // Reuse persisted transaction details only. The candidate's total_usd and
+  // price_avg are the authoritative aggregate from the legacy signal merge;
+  // archived raw fills must not be partially re-aggregated.
+  return localTrades.map(trade => ({
+    ...trade,
+    timestamp: Math.floor(Date.parse(trade.traded_at) / 1000),
   }));
-  const keys = new Set(local.map(trade => [
-    trade.transaction_hash, trade.wallet, trade.timestamp, trade.price, trade.size,
-  ].join("|")));
-  const recovered = marketHistory.filter(trade => trade.wallet === candidate.wallet.toLowerCase()
-    && trade.condition_id === candidate.condition_id
-    && normalizedOutcome(trade.outcome) === normalizedOutcome(candidate.outcome)
-    && trade.timestamp * 1000 >= start && trade.timestamp * 1000 <= end
-    && !keys.has([trade.transaction_hash, trade.wallet, trade.timestamp, trade.price, trade.size].join("|")));
-  return [...local, ...recovered];
 }
 
 async function scoreAlertCandidate(
@@ -427,27 +422,17 @@ async function scoreAlertCandidate(
   ]);
   const eventTrades = historicalRowsForCandidate(candidate, localTrades, marketHistory.trades);
   const expectedTradeIds = new Set(candidate.trade_ids ?? []);
-  const exactEventTrades = new Map(
-    eventTrades.filter(trade => expectedTradeIds.has(trade.trade_id))
-      .map(trade => [trade.trade_id, trade] as const),
-  );
+  const exactEventTrades = eventTrades.filter(trade => expectedTradeIds.has(trade.trade_id));
   const eventAmountIsComplete = expectedTradeIds.size > 0
-    && [...expectedTradeIds].every(id => exactEventTrades.has(id));
-  const exactEventRows = [...exactEventTrades.values()];
-  const exactEventTotalUsd = exactEventRows.reduce((sum, trade) => sum + trade.usd_amount, 0);
+    && exactEventTrades.length === expectedTradeIds.size;
+  const exactEventTotalUsd = exactEventTrades.reduce((sum, trade) => sum + trade.usd_amount, 0);
   const exactEventWeightedPrice = exactEventTotalUsd > 0
-    ? exactEventRows.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0) / exactEventTotalUsd
+    ? exactEventTrades.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0) / exactEventTotalUsd
     : null;
-  // When the full set of alert trade IDs is available (including recovered API
-  // history), recompute its amount and weighted price from unique fills. Otherwise
-  // keep the stored aggregate rather than silently treating partial history as exact.
-  const effectiveTotalUsd = eventAmountIsComplete ? exactEventTotalUsd : candidate.total_usd;
-  const price = eventAmountIsComplete
-    ? exactEventWeightedPrice
-    : candidate.price_avg ?? (eventTrades.length
-      ? eventTrades.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0)
-        / Math.max(1, eventTrades.reduce((sum, trade) => sum + trade.usd_amount, 0))
-      : null);
+  const effectiveTotalUsd = candidate.total_usd;
+  // Use the stored weighted average unless all source fills remain in the raw
+  // trades table. A partial raw subset cannot safely override the event price.
+  const price = eventAmountIsComplete ? exactEventWeightedPrice : candidate.price_avg;
   const eventEpoch = Math.floor(eventTime / 1000);
 
   let accountAgeDays: number | null = null;
@@ -459,14 +444,19 @@ async function scoreAlertCandidate(
 
   let concentrationRatio: number | null = null;
   if (userHistory.complete) {
-    const before = userHistory.trades.filter(trade => trade.side === "BUY" && trade.timestamp < eventEpoch);
-    const allPrevious = before.reduce((sum, trade) => sum + trade.usd_amount, 0);
-    const targetPrevious = before.filter(trade =>
-      trade.condition_id === candidate.condition_id
-      && normalizedOutcome(trade.outcome) === normalizedOutcome(candidate.outcome)
-    ).reduce((sum, trade) => sum + trade.usd_amount, 0);
-    const denominator = allPrevious + candidate.total_usd;
-    if (denominator > 0) concentrationRatio = (targetPrevious + candidate.total_usd) / denominator;
+    let allPrevious = 0;
+    let targetPrevious = 0;
+    const targetOutcome = normalizedOutcome(candidate.outcome);
+    for (const trade of userHistory.trades) {
+      if (trade.side !== "BUY" || trade.timestamp >= eventEpoch) continue;
+      allPrevious += trade.usd_amount;
+      if (trade.condition_id === candidate.condition_id
+        && normalizedOutcome(trade.outcome) === targetOutcome) {
+        targetPrevious += trade.usd_amount;
+      }
+    }
+    const denominator = allPrevious + effectiveTotalUsd;
+    if (denominator > 0) concentrationRatio = (targetPrevious + effectiveTotalUsd) / denominator;
   }
 
   let comparableAmounts: number[] | null = null;
