@@ -906,7 +906,7 @@ Deno.serve(async (req: Request) => {
     let { data: catalogue, error: catalogueError } = await db.from("markets")
       .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
       .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
-      .order("volume", { ascending: false, nullsLast: true }).limit(2000);
+      .order("volume", { ascending: false, nullsFirst: false }).limit(2000);
     if (catalogueError) throw new Error(`Lecture du catalogue: ${catalogueError.message}`);
     const latest = (catalogue ?? []).reduce((max, m) => Math.max(max, Date.parse(m.updated_at ?? "1970-01-01")), 0);
     const presentCategories = new Set((catalogue ?? []).map(m => m.category));
