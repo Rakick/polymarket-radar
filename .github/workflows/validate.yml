@@ -2,7 +2,7 @@ name: Validate
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'fix/**']
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
