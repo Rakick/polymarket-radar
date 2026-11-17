@@ -40,12 +40,20 @@ export async function GET(request: NextRequest) {
     const markets = new Map<string, any>((marketResult.data ?? []).map(market => [market.id, market]));
     const trades = new Map<string, any>((tradeResult.data ?? []).map(trade => [trade.trade_id, trade]));
     return NextResponse.json({
-      alerts: (alerts ?? []).map(alert => ({
-        ...alert,
-        side: "BUY",
-        market: markets.get(alert.market_id) ?? null,
-        trades: (alert.trade_ids ?? []).map((id: string) => trades.get(id)).filter(Boolean),
-      })),
+      alerts: (alerts ?? []).map(alert => {
+        const alertTrades = (alert.trade_ids ?? [])
+          .map((id: string) => trades.get(id))
+          .filter(Boolean);
+        return {
+          ...alert,
+          side: "BUY",
+          // Legacy alerts may have a null outcome even though their stored fills
+          // contain it. Use the transaction as the source of truth for display.
+          outcome: alert.outcome ?? alertTrades.find((trade: any) => trade.outcome)?.outcome ?? null,
+          market: markets.get(alert.market_id) ?? null,
+          trades: alertTrades,
+        };
+      }),
       total: alerts?.length ?? 0,
       generatedAt: new Date().toISOString(),
     });
