@@ -205,7 +205,6 @@ type AlertCandidate = {
 type ScoringCache = {
   users: Map<string, Promise<HistoryResult>>;
   markets: Map<string, Promise<HistoryResult>>;
-  joinDates: Map<string, Promise<string | null>>;
 };
 const MODEL_VERSION = "informed-buy-v1";
 const DISPLAY_SCORE_MIN = 50;
@@ -215,131 +214,7 @@ const WINDOW_MS = 30 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function makeScoringCache(): ScoringCache {
-  return { users: new Map(), markets: new Map(), joinDates: new Map() };
-}
-
-async function getPolymarketJoinDate(wallet: string): Promise<string | null> {
-  const profile = await fetchJson<any>(`https://data-api.polymarket.com/v2/user-stats?user=${encodeURIComponent(wallet)}`);
-  const seconds = Number(profile?.data?.join_date);
-  return Number.isFinite(seconds) && seconds > 0
-    ? new Date(seconds * 1000).toISOString()
-    : null;
-}
-
-function parseHistoryTrade(row: any): HistoryTrade | null {
-  const wallet = String(row?.proxy_wallet ?? row?.wallet ?? "").toLowerCase();
-  const condition = String(row?.condition_id ?? row?.conditionId ?? "");
-  const transactionHash = String(row?.transaction_hash ?? "");
-  const timestamp = Number(row?.timestamp);
-  const price = Number(row?.price);
-  const size = Number(row?.size);
-  const side = String(row?.side ?? "").toUpperCase();
-  if (!wallet || !condition || !transactionHash || !Number.isFinite(timestamp)
-    || !Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0
-    || (side !== "BUY" && side !== "SELL")) return null;
-  return {
-    trade_id: "", transaction_hash: transactionHash, wallet, side: side as "BUY" | "SELL",
-    condition_id: condition, outcome: row?.outcome == null ? null : String(row.outcome),
-    price, size, usd_amount: Math.round(price * size * 100) / 100,
-    traded_at: new Date(timestamp * 1000).toISOString(), timestamp,
-  } as HistoryTrade & { _idInput?: string };
-}
-
-async function fetchTradeHistory(params: Record<string, string>, stopBeforeMs?: number): Promise<HistoryResult> {
-  const trades: HistoryTrade[] = [];
-  const seen = new Set<string>();
-  let cursor: string | undefined;
-  for (let page = 0; page < HISTORY_MAX_PAGES; page++) {
-    const query = new URLSearchParams({ ...params, limit: String(HISTORY_PAGE_SIZE) });
-    if (cursor) query.set("cursor", cursor);
-    let payload: any;
-    try {
-      payload = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${query}`);
-    } catch (error) {
-      return { trades, complete: false, error: (error as Error).message };
-    }
-    const rows = Array.isArray(payload?.data) ? payload.data : [];
-    let oldest = Number.POSITIVE_INFINITY;
-    for (const row of rows) {
-      const parsed = parseHistoryTrade(row);
-      if (!parsed) continue;
-      oldest = Math.min(oldest, parsed.timestamp * 1000);
-      const walletInput = String(row?.proxy_wallet ?? row?.wallet ?? "");
-      const tokenId = row?.token_id ?? "";
-      const idInput = [parsed.transaction_hash, walletInput, tokenId, row?.side, row.size, row.price, parsed.timestamp].join("|");
-      const uniqueKey = `${idInput}|${parsed.outcome ?? ""}`;
-      if (seen.has(uniqueKey)) continue;
-      seen.add(uniqueKey);
-      // Hashes are only needed for live fills persisted in public.trades.
-      // Historical rows feed aggregates and distributions; hashing every row
-      // across up to 40,000 API results exhausted the Edge Function CPU budget.
-      trades.push(parsed);
-    }
-
-    if (stopBeforeMs != null && oldest < stopBeforeMs) {
-      return { trades, complete: true };
-    }
-    const hasMore = payload?.pagination?.has_more === true;
-    const nextCursor = payload?.pagination?.next_cursor;
-    if (!hasMore) return { trades, complete: true };
-    if (typeof nextCursor !== "string" || !nextCursor || nextCursor === cursor) {
-      return { trades, complete: false, error: "Pagination Polymarket incomplète ou curseur répété" };
-    }
-    cursor = nextCursor;
-  }
-  return { trades, complete: false, error: `Plafond de sécurité atteint après ${HISTORY_MAX_PAGES} pages` };
-}
-
-function getUserHistory(wallet: string, cache: ScoringCache): Promise<HistoryResult> {
-  const key = wallet.toLowerCase();
-  if (!cache.users.has(key)) {
-    const end = Math.floor(Date.now() / 1000);
-    cache.users.set(key, fetchTradeHistory({
-      // Fetch both BUY and SELL: the first observed activity can be either side.
-      user: key, start: "1", end: String(end),
-      taker_only: "false", filter_type: "CASH", filter_amount: "0",
-    }));
-  }
-  return cache.users.get(key)!;
-}
-
-function getMarketHistory(condition: string, eventTimeMs: number, cache: ScoringCache): Promise<HistoryResult> {
-  // The fetched history stops 30 days before this alert's timestamp. Cache keys
-  // therefore include the event time; sharing only by condition can truncate an
-  // earlier alert's 30-day baseline if a later alert populates the cache first.
-  const key = `${condition.toLowerCase()}:${Math.floor(eventTimeMs / 1000)}`;
-  if (!cache.markets.has(key)) {
-    cache.markets.set(key, fetchTradeHistory({
-      condition, side: "BUY", taker_only: "false",
-      filter_type: "CASH", filter_amount: "0",
-    }, eventTimeMs - 30 * DAY_MS));
-  }
-  return cache.markets.get(key)!;
-}
-
-async function getVerifiedJoinDate(wallet: string, cache: ScoringCache): Promise<string | null> {
-  const key = wallet.toLowerCase();
-  if (!cache.joinDates.has(key)) {
-    cache.joinDates.set(key, (async () => {
-      const { data, error } = await db.from("wallets")
-        .select("created_at_verified").eq("address", key).maybeSingle();
-      if (error) throw error;
-      if (data?.created_at_verified) return String(data.created_at_verified);
-      const joinDate = await getPolymarketJoinDate(key);
-      if (joinDate) {
-        const { error: saveError } = await db.from("wallets").upsert({
-          address: key, created_at_verified: joinDate, updated_at: new Date().toISOString(),
-        }, { onConflict: "address" });
-        if (saveError) throw saveError;
-      }
-      return joinDate;
-    })());
-  }
-  try { return await cache.joinDates.get(key)!; }
-  catch (error) {
-    console.error(`[informed-scoring] join date ${key}: ${(error as Error).message}`);
-    return null;
-  }
+  return { users: new Map(), markets: new Map() };
 }
 
 function normalizedOutcome(value: string | null | undefined) {
@@ -440,7 +315,7 @@ async function scoreAlertCandidate(
   // A partial history must not be presented as a reliable account age.
   let accountAgeDays: number | null = null;
   if (userHistory.complete && userHistory.trades.length > 0) {
-    const firstActivity = Math.min(...userHistory.trades.map(trade => trade.timestamp));
+    const firstActivity = userHistory.trades.reduce((earliest, trade) => Math.min(earliest, trade.timestamp), Number.POSITIVE_INFINITY);
     const age = (Date.now() / 1000 - firstActivity) / (24 * 60 * 60);
     if (Number.isFinite(age) && age >= 0) accountAgeDays = age;
   }
