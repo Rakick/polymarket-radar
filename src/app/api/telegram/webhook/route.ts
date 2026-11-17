@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ok:true});
   }
   const username=typeof message.from?.username==="string"?message.from.username:null;
-  const {error:saveError}=await db.from("telegram_connections").upsert({user_id:link.user_id,chat_id,telegram_username:username,enabled:true,updated_at:new Date().toISOString()},{onConflict:"user_id"});
+  const {error:saveError}=await db.from("telegram_connections").upsert({user_id:link.user_id,chat_id:chatId,telegram_username:username,enabled:true,updated_at:new Date().toISOString()},{onConflict:"user_id"});
   if(saveError) return NextResponse.json({error:"connection_failed"},{status:500});
   await db.from("telegram_link_codes").update({consumed_at:new Date().toISOString()}).eq("code_hash",digest).is("consumed_at",null);
   await sendTelegram(chatId,"✅ Polymarket Radar est connecté. Vous recevrez un message uniquement lorsqu'une alerte valide les 6 critères.");
