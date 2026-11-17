@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
-import MonitoringPanel from "@/components/MonitoringPanel";
 
 type Factor = {
   code: string; label: string; weight: number; subscore: number | null;
@@ -104,12 +103,10 @@ export default function Dashboard() {
   return (
     <main className="radar-shell" data-theme={theme}>
       <aside className="sidebar">
-        <a className="brand" href="#overview"><span className="brand-mark"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".55"/><circle cx="20" cy="20" r="9" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".8"/><path d="M20 20 32 8M20 20l-1 10" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/><circle cx="20" cy="20" r="2.7" fill="currentColor"/></svg></span><span>POLYMARKET<span className="brand-muted">RADAR / INTELLIGENCE</span></span></a>
+        <a className="brand" href="/"><span className="brand-mark"><svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="15" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".55"/><circle cx="20" cy="20" r="9" fill="none" stroke="currentColor" strokeWidth="1.6" opacity=".8"/><path d="M20 20 32 8M20 20l-1 10" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/><circle cx="20" cy="20" r="2.7" fill="currentColor"/></svg></span><span>POLYMARKET<span className="brand-muted">RADAR / INTELLIGENCE</span></span></a>
         <div className="sidebar-label">WORKSPACE</div>
-        <a className="nav-item active" href="#overview"><span>⌂</span> Vue d’ensemble</a>
-        <a className="nav-item" href="#alerts"><span>◈</span> Alertes BUY <b>{alerts.length}</b></a>
-        <div className="sidebar-label nav-secondary-label">MONITORING</div>
-        <a className="nav-item" href="#monitoring"><span>◎</span> Surveillance active</a>
+        <a className="nav-item active" href="/"><span>⌂</span> Surveillance active <b>{alerts.length}</b></a>
+        <a className="nav-item" href="/statistics"><span>▥</span> Statistiques & méthode</a>
         <div className="sidebar-bottom">
           <div className="system-card"><span className="status-dot" /> <span><strong>Scanner actif</strong><small>Synchronisation automatique</small></span></div>
           <button className="logout-button" onClick={() => browserClient().auth.signOut()}>↗ Déconnexion</button>
@@ -190,7 +187,6 @@ export default function Dashboard() {
           </div>
           <footer className="list-footer"><span>{updatedAt ? `Données actualisées à ${date(updatedAt)}` : "En attente de synchronisation"}</span><span>Actualisation automatique chaque minute</span></footer>
         </section>
-        <MonitoringPanel />
         <footer className="page-footer">POLYMARKET RADAR <span>•</span> Outil d’aide à l’analyse — les alertes ne constituent pas des preuves de fraude.</footer>
       </section>
     </main>
