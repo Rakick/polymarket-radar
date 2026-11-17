@@ -423,10 +423,28 @@ async function scoreAlertCandidate(
     marketHistoryPromise, userHistoryPromise, joinDatePromise,
   ]);
   const eventTrades = historicalRowsForCandidate(candidate, localTrades, marketHistory.trades);
-  const price = candidate.price_avg ?? (eventTrades.length
-    ? eventTrades.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0)
-      / Math.max(1, eventTrades.reduce((sum, trade) => sum + trade.usd_amount, 0))
-    : null);
+  const expectedTradeIds = new Set(candidate.trade_ids ?? []);
+  const exactEventTrades = new Map(
+    eventTrades.filter(trade => expectedTradeIds.has(trade.trade_id))
+      .map(trade => [trade.trade_id, trade] as const),
+  );
+  const eventAmountIsComplete = expectedTradeIds.size > 0
+    && [...expectedTradeIds].every(id => exactEventTrades.has(id));
+  const exactEventRows = [...exactEventTrades.values()];
+  const exactEventTotalUsd = exactEventRows.reduce((sum, trade) => sum + trade.usd_amount, 0);
+  const exactEventWeightedPrice = exactEventTotalUsd > 0
+    ? exactEventRows.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0) / exactEventTotalUsd
+    : null;
+  // When the full set of alert trade IDs is available (including recovered API
+  // history), recompute its amount and weighted price from unique fills. Otherwise
+  // keep the stored aggregate rather than silently treating partial history as exact.
+  const effectiveTotalUsd = eventAmountIsComplete ? exactEventTotalUsd : candidate.total_usd;
+  const price = eventAmountIsComplete
+    ? exactEventWeightedPrice
+    : candidate.price_avg ?? (eventTrades.length
+      ? eventTrades.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0)
+        / Math.max(1, eventTrades.reduce((sum, trade) => sum + trade.usd_amount, 0))
+      : null);
   const eventEpoch = Math.floor(eventTime / 1000);
 
   let accountAgeDays: number | null = null;
@@ -510,7 +528,7 @@ async function scoreAlertCandidate(
   }
 
   const scored = calculateInformedScore({
-    totalUsd: candidate.total_usd,
+    totalUsd: effectiveTotalUsd,
     price,
     accountAgeDays,
     concentrationRatio,
@@ -520,7 +538,7 @@ async function scoreAlertCandidate(
   });
   const confidence = scored.coverage >= 90 ? "high" : scored.coverage >= 60 ? "medium" : "low";
   return {
-    row: { ...candidate, price_avg: price },
+    row: { ...candidate, total_usd: effectiveTotalUsd, price_avg: price },
     score: scored.score, coverage: scored.coverage, factors: scored.factors,
     missing: scored.missing, conditions: scored.conditions, confidence,
   };
