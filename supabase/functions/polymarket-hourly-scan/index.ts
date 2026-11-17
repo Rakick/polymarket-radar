@@ -857,7 +857,7 @@ Deno.serve(async (req: Request) => {
   await db.from("scans").update({
     status: "failed", finished_at: new Date().toISOString(),
     errors: ["Exécution interrompue après expiration du verrou de scan (5 minutes)."]
-  }).eq("status", "running").lt("started_at", new Date(Date.now() - 15 * 60 * 1000).toISOString());
+  }).eq("status", "running").lt("started_at", new Date(Date.now() - 2 * 60 * 1000).toISOString());
 
   const { data: settingRow, error: settingsError } = await db.from("app_settings").select("data").eq("id", 1).single();
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
