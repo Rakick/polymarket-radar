@@ -665,18 +665,33 @@ async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; t
     const hasNewTrades = mergedIds.some(id => !previousIds.has(id));
     if (existing.status === "done" && !hasNewTrades) continue;
 
+    // Rebuild the merged aggregate from its distinct underlying trades so
+    // overlapping rolling scan windows never double-count or undercount USD.
+    const mergedTradeRows: Array<{ usd_amount: number; price: number; traded_at: string }> = [];
+    for (let offset = 0; offset < mergedIds.length; offset += 500) {
+      const { data: rows, error: tradesError } = await db.from("trades")
+        .select("usd_amount,price,traded_at")
+        .in("trade_id", mergedIds.slice(offset, offset + 500));
+      if (tradesError) throw tradesError;
+      mergedTradeRows.push(...(rows ?? []) as Array<{ usd_amount: number; price: number; traded_at: string }>);
+    }
+    if (mergedTradeRows.length !== mergedIds.length) {
+      throw new Error(`Transactions du candidat incomplètes : ${mergedTradeRows.length}/${mergedIds.length}`);
+    }
+    const mergedTotalUsd = mergedTradeRows.reduce((sum, trade) => sum + Number(trade.usd_amount), 0);
+    const weightedPrice = mergedTotalUsd > 0
+      ? mergedTradeRows.reduce((sum, trade) => sum + Number(trade.price) * Number(trade.usd_amount), 0) / mergedTotalUsd
+      : null;
     const merged: AlertCandidate = {
       ...previous,
       ...row,
       trade_ids: mergedIds,
-      total_usd: Math.max(Number(previous?.total_usd) || 0, row.total_usd),
-      price_min: previous?.price_min == null ? row.price_min
-        : row.price_min == null ? previous.price_min
-        : Math.min(previous.price_min, row.price_min),
-      first_trade_at: previous?.first_trade_at && Date.parse(previous.first_trade_at) < Date.parse(row.first_trade_at)
-        ? previous.first_trade_at : row.first_trade_at,
-      last_trade_at: previous?.last_trade_at && Date.parse(previous.last_trade_at) > Date.parse(row.last_trade_at)
-        ? previous.last_trade_at : row.last_trade_at,
+      total_usd: Math.round(mergedTotalUsd * 100) / 100,
+      price_min: mergedTradeRows.length ? Math.min(...mergedTradeRows.map(trade => Number(trade.price))) : null,
+      price_avg: weightedPrice,
+      alert_type: mergedTradeRows.length > 1 ? "grouped" : "single",
+      first_trade_at: mergedTradeRows.reduce((min, trade) => Date.parse(trade.traded_at) < Date.parse(min) ? trade.traded_at : min, mergedTradeRows[0].traded_at),
+      last_trade_at: mergedTradeRows.reduce((max, trade) => Date.parse(trade.traded_at) > Date.parse(max) ? trade.traded_at : max, mergedTradeRows[0].traded_at),
     };
     const { error } = await db.from("informed_buy_candidate_queue")
       .update({
