@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { calculateInformedScore } from "./scoring.ts";
 
 const cors = { "content-type": "application/json" };
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -189,180 +190,394 @@ async function getTrades(market: any, start: number, end: number) {
     truncated: true,
   };
 }
-type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number };
-const MIN_ALERT_SCORE = 50;
-function minimumForPrice(price: number): number | null {
-  if (price <= 0 || price > 0.2) return null;
-  if (price < 0.05) return 1000;
-  if (price < 0.10) return 2500;
-  return 7500;
-}
-async function getPolymarketJoinDate(wallet: string): Promise<string | null> {
-  const profile = await fetchJson<any>(`https://data-api.polymarket.com/v2/user-stats?user=${encodeURIComponent(wallet)}`);
-  const seconds = Number(profile?.data?.join_date);
-  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000).toISOString() : null;
-}
-function clamp(value: number, min = 0, max = 1) { return Math.max(min, Math.min(max, value)); }
+type HistoryTrade = {
+  trade_id: string; transaction_hash: string; wallet: string; side: "BUY" | "SELL";
+  condition_id: string; outcome: string | null; price: number; size: number;
+  usd_amount: number; traded_at: string; timestamp: number;
+};
+type HistoryResult = { trades: HistoryTrade[]; complete: boolean; error?: string };
+type AlertCandidate = {
+  dedupe_key: string; wallet: string; market_id: string; condition_id: string;
+  alert_type: "single" | "grouped"; outcome: string | null; trade_ids: string[];
+  total_usd: number; price_min: number | null; price_avg: number | null;
+  first_trade_at: string; last_trade_at: string;
+};
+type ScoringCache = {
+  users: Map<string, Promise<HistoryResult>>;
+  markets: Map<string, Promise<HistoryResult>>;
+  joinDates: Map<string, Promise<string | null>>;
+};
+const MODEL_VERSION = "informed-buy-v1";
+const DISPLAY_SCORE_MIN = 50;
+const HISTORY_PAGE_SIZE = 1000;
+const HISTORY_MAX_PAGES = 40;
+const WINDOW_MS = 30 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-function buildV2Signals(trades: Trade[], settings: Settings) {
-  const minimumUsd = Math.max(250, Number(settings.min_usd ?? 500));
-  // Regle produit : ne pas suivre les probabilites au-dessus de 60c (v2_max_price).
-  const maxPrice = Number((settings as any).v2_max_price ?? 0.6);
-  const windowMs = Math.max(5, Number(settings.group_window_minutes ?? 30)) * 60_000;
-  const sorted = trades
-    .filter(t => Number.isFinite(t.usd_amount) && t.usd_amount > 0 && Number.isFinite(Date.parse(t.traded_at)))
-    .sort((a,b) => a.wallet.localeCompare(b.wallet) || a.condition_id.localeCompare(b.condition_id)
-      || a.side.localeCompare(b.side) || String(a.outcome ?? "").localeCompare(String(b.outcome ?? ""))
-      || Date.parse(a.traded_at)-Date.parse(b.traded_at));
-  const signals: any[] = [];
+function makeScoringCache(): ScoringCache {
+  return { users: new Map(), markets: new Map(), joinDates: new Map() };
+}
+
+function parseHistoryTrade(row: any): HistoryTrade | null {
+  const wallet = String(row?.proxy_wallet ?? row?.wallet ?? "").toLowerCase();
+  const condition = String(row?.condition_id ?? row?.conditionId ?? "");
+  const transactionHash = String(row?.transaction_hash ?? "");
+  const timestamp = Number(row?.timestamp);
+  const price = Number(row?.price);
+  const size = Number(row?.size);
+  const side = String(row?.side ?? "").toUpperCase();
+  if (!wallet || !condition || !transactionHash || !Number.isFinite(timestamp)
+    || !Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0
+    || (side !== "BUY" && side !== "SELL")) return null;
+  const tokenId = row?.asset ?? row?.token_id ?? "";
+  const idInput = [transactionHash, wallet, tokenId, side, row.size, row.price, timestamp].join("|");
+  return {
+    trade_id: "", transaction_hash: transactionHash, wallet, side: side as "BUY" | "SELL",
+    condition_id: condition, outcome: row?.outcome == null ? null : String(row.outcome),
+    price, size, usd_amount: Math.round(price * size * 100) / 100,
+    traded_at: new Date(timestamp * 1000).toISOString(), timestamp,
+  } as HistoryTrade & { _idInput?: string };
+}
+
+async function fetchTradeHistory(params: Record<string, string>, stopBeforeMs?: number): Promise<HistoryResult> {
+  const trades: HistoryTrade[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < HISTORY_MAX_PAGES; page++) {
+    const query = new URLSearchParams({ ...params, limit: String(HISTORY_PAGE_SIZE) });
+    if (cursor) query.set("cursor", cursor);
+    let payload: any;
+    try {
+      payload = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${query}`);
+    } catch (error) {
+      return { trades, complete: false, error: (error as Error).message };
+    }
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+      const parsed = parseHistoryTrade(row);
+      if (!parsed) continue;
+      oldest = Math.min(oldest, parsed.timestamp * 1000);
+      const tokenId = row?.asset ?? row?.token_id ?? "";
+      const idInput = [parsed.transaction_hash, parsed.wallet, tokenId, parsed.side, row.size, row.price, parsed.timestamp].join("|");
+      const uniqueKey = `${idInput}|${parsed.outcome ?? ""}`;
+      if (seen.has(uniqueKey)) continue;
+      seen.add(uniqueKey);
+      parsed.trade_id = await hash(idInput);
+      trades.push(parsed);
+    }
+
+    if (stopBeforeMs != null && oldest < stopBeforeMs) {
+      return { trades, complete: true };
+    }
+    const hasMore = payload?.pagination?.has_more === true;
+    const nextCursor = payload?.pagination?.next_cursor;
+    if (!hasMore) return { trades, complete: true };
+    if (typeof nextCursor !== "string" || !nextCursor || nextCursor === cursor) {
+      return { trades, complete: false, error: "Pagination Polymarket incomplète ou curseur répété" };
+    }
+    cursor = nextCursor;
+  }
+  return { trades, complete: false, error: `Plafond de sécurité atteint après ${HISTORY_MAX_PAGES} pages` };
+}
+
+function getUserHistory(wallet: string, cache: ScoringCache): Promise<HistoryResult> {
+  const key = wallet.toLowerCase();
+  if (!cache.users.has(key)) {
+    const end = Math.floor(Date.now() / 1000);
+    cache.users.set(key, fetchTradeHistory({
+      user: key, side: "BUY", start: "1", end: String(end),
+      taker_only: "false", filter_type: "CASH", filter_amount: "0",
+    }));
+  }
+  return cache.users.get(key)!;
+}
+
+function getMarketHistory(condition: string, eventTimeMs: number, cache: ScoringCache): Promise<HistoryResult> {
+  const key = condition.toLowerCase();
+  if (!cache.markets.has(key)) {
+    cache.markets.set(key, fetchTradeHistory({
+      condition, side: "BUY", taker_only: "false",
+      filter_type: "CASH", filter_amount: "0",
+    }, eventTimeMs - 30 * DAY_MS));
+  }
+  return cache.markets.get(key)!;
+}
+
+async function getVerifiedJoinDate(wallet: string, cache: ScoringCache): Promise<string | null> {
+  const key = wallet.toLowerCase();
+  if (!cache.joinDates.has(key)) {
+    cache.joinDates.set(key, (async () => {
+      const { data, error } = await db.from("wallets")
+        .select("created_at_verified").eq("address", key).maybeSingle();
+      if (error) throw error;
+      if (data?.created_at_verified) return String(data.created_at_verified);
+      const joinDate = await getPolymarketJoinDate(key);
+      if (joinDate) {
+        const { error: saveError } = await db.from("wallets").upsert({
+          address: key, created_at_verified: joinDate, updated_at: new Date().toISOString(),
+        }, { onConflict: "address" });
+        if (saveError) throw saveError;
+      }
+      return joinDate;
+    })());
+  }
+  try { return await cache.joinDates.get(key)!; }
+  catch (error) {
+    console.error(`[informed-scoring] join date ${key}: ${(error as Error).message}`);
+    return null;
+  }
+}
+
+function normalizedOutcome(value: string | null | undefined) {
+  return String(value ?? "").trim().toLowerCase();
+}
+function priceBand(price: number): number {
+  if (price < 0.10) return 0;
+  if (price < 0.20) return 1;
+  if (price < 0.40) return 2;
+  if (price < 0.60) return 3;
+  return -1;
+}
+
+function buildAlertCandidates(trades: Trade[], windowMinutes: number): Array<{ row: AlertCandidate; trades: Trade[] }> {
+  const windowMs = Math.max(5, Number(windowMinutes || 30)) * 60_000;
+  const sorted = trades.filter(trade => trade.side === "BUY" && trade.usd_amount > 0)
+    .sort((a, b) => a.wallet.localeCompare(b.wallet)
+      || a.condition_id.localeCompare(b.condition_id)
+      || normalizedOutcome(a.outcome).localeCompare(normalizedOutcome(b.outcome))
+      || Date.parse(a.traded_at) - Date.parse(b.traded_at));
+  const result: Array<{ row: AlertCandidate; trades: Trade[] }> = [];
   let group: Trade[] = [];
   const flush = () => {
     if (!group.length) return;
-    const total = group.reduce((sum,t) => sum + t.usd_amount, 0);
-    const weightedPrice = total > 0 ? group.reduce((sum,t) => sum+t.price*t.usd_amount,0)/total : 0;
-    if (total >= minimumUsd && weightedPrice <= maxPrice) {
-      const first = group[0], last = group[group.length-1];
-      const bucket = Math.floor(Date.parse(first.traded_at)/windowMs);
-      signals.push({
-        dedupe_key: [first.wallet,first.condition_id,first.side,first.outcome ?? "unknown",bucket].join("|"),
-        wallet:first.wallet, market_id:first.market_id, condition_id:first.condition_id,
-        side:first.side, outcome:first.outcome,
-        trade_ids:group.map(t=>t.trade_id), total_usd:Math.round(total*100)/100,
-        price_min:Math.min(...group.map(t=>t.price)), price_avg:weightedPrice,
-        first_trade_at:first.traded_at, last_trade_at:last.traded_at,
-        updated_at:new Date().toISOString(),
-      });
-    }
-    group=[];
+    const first = group[0], last = group[group.length - 1];
+    const totalUsd = group.reduce((sum, trade) => sum + trade.usd_amount, 0);
+    const weightedPrice = totalUsd > 0
+      ? group.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0) / totalUsd
+      : null;
+    const bucket = Math.floor(Date.parse(first.traded_at) / WINDOW_MS);
+    result.push({
+      row: {
+        dedupe_key: `informed_buy|${first.wallet}|${first.condition_id}|${normalizedOutcome(first.outcome) || "unknown"}|${bucket}`,
+        wallet: first.wallet, market_id: first.market_id, condition_id: first.condition_id,
+        alert_type: group.length > 1 ? "grouped" : "single", outcome: first.outcome,
+        trade_ids: [...new Set(group.map(trade => trade.trade_id))],
+        total_usd: Math.round(totalUsd * 100) / 100,
+        price_min: Math.min(...group.map(trade => trade.price)),
+        price_avg: weightedPrice,
+        first_trade_at: first.traded_at, last_trade_at: last.traded_at,
+      },
+      trades: [...group],
+    });
+    group = [];
   };
   for (const trade of sorted) {
-    const previous=group[group.length-1];
-    const sameGroup=previous && previous.wallet===trade.wallet && previous.condition_id===trade.condition_id
-      && previous.side===trade.side && (previous.outcome ?? "")===(trade.outcome ?? "")
-      && Date.parse(trade.traded_at)-Date.parse(previous.traded_at)<=windowMs;
+    const previous = group[group.length - 1];
+    const sameGroup = previous
+      && previous.wallet === trade.wallet
+      && previous.condition_id === trade.condition_id
+      && normalizedOutcome(previous.outcome) === normalizedOutcome(trade.outcome)
+      && Date.parse(trade.traded_at) - Date.parse(previous.traded_at) <= windowMs;
     if (!sameGroup) flush();
     group.push(trade);
   }
   flush();
-  return signals;
+  return result;
 }
 
-function buildAlerts(trades: Trade[], settings: Settings, walletContext: Record<string, WalletContext>) {
-  const groups = new Map<string, Trade[]>();
-  for (const t of trades.filter(t => {
-    if (t.side !== "BUY") return false;
-    const threshold = minimumForPrice(t.price);
-    return threshold !== null && t.usd_amount >= threshold;
-  })) {
-    const k = `${t.wallet}|${t.condition_id}`;
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k)!.push(t);
+function historicalRowsForCandidate(candidate: AlertCandidate, localTrades: Trade[], marketHistory: HistoryTrade[]): HistoryTrade[] {
+  if (localTrades.length) {
+    return localTrades.map(trade => ({
+      ...trade, timestamp: Math.floor(Date.parse(trade.traded_at) / 1000),
+    }));
   }
-
-  // Cross-wallet activity is measured only among trades actually fetched in this scan batch.
-  const coordinated = new Map<string, Set<string>>();
-  for (const t of trades) {
-    const minStake = minimumForPrice(t.price);
-    if (t.side !== "BUY" || minStake === null || t.usd_amount < minStake) continue;
-    const bucket = Math.floor(Date.parse(t.traded_at) / 600000);
-    const key = `${t.condition_id}|${t.outcome ?? "unknown"}|${bucket}`;
-    if (!coordinated.has(key)) coordinated.set(key, new Set());
-    coordinated.get(key)!.add(t.wallet);
-  }
-
-  const alerts: any[] = [];
-  for (const [key, ts] of groups) {
-    const [wallet, condition] = key.split("|");
-    ts.sort((a,b) => Date.parse(a.traded_at) - Date.parse(b.traded_at));
-    const buckets: Trade[][] = [];
-    let current: Trade[] = [], first = 0;
-    for (const t of ts) {
-      const time = Date.parse(t.traded_at);
-      if (!current.length || time - first <= settings.group_window_minutes * 60000) {
-        if (!current.length) first = time;
-        current.push(t);
-      } else { buckets.push(current); current = [t]; first = time; }
-    }
-    if (current.length) buckets.push(current);
-
-    for (const g of buckets) {
-      const total = g.reduce((a,t) => a + t.usd_amount, 0);
-      const weightedPrice = total > 0 ? g.reduce((a,t) => a + t.price * t.usd_amount, 0) / total : 0;
-      const minPrice = Math.min(...g.map(t => t.price));
-      const threshold = minimumForPrice(weightedPrice);
-      if (threshold === null || total < threshold) continue;
-      const exceptionalSingle = g.length === 1 && total >= threshold * 5;
-      if (g.length < 2 && !exceptionalSingle) continue;
-
-      const factors: any[] = [], missing: string[] = [];
-      const push = (code: string, label: string, points: number, detail: string) => {
-        const rounded = Math.round(points * 10) / 10;
-        if (rounded > 0.01) factors.push({ code, label_fr: label, label_en: label, points: rounded, detail });
-      };
-
-      // Equivalent stake normalizes for odds: $1k at 3c ~= $5k at 10c.
-      const oddsMultiplier = clamp(Math.pow(0.10 / Math.max(weightedPrice, 0.01), 1.35), 0.5, 10);
-      const adjustedAmount = total * oddsMultiplier;
-      const amountPoints = (settings.weights.adjusted_amount ?? 30) * clamp(Math.log10(Math.max(1, adjustedAmount / 500)) / 1.5);
-      push("adjusted_amount", "Montant ajusté à la cote", amountPoints,
-        `${Math.round(total)} $ réels · ${Math.round(adjustedAmount)} $ équivalents (cote moyenne ${(weightedPrice*100).toFixed(1)} c)`);
-
-      const ctx = walletContext[wallet];
-      if (!ctx || ctx.ageDays === null) missing.push("wallet_age");
-      else if (ctx.ageDays <= settings.account_age_days) {
-        const agePoints = (settings.weights.wallet_age ?? 12) * (1 - clamp(ctx.ageDays / settings.account_age_days));
-        push("wallet_age", "Compte Polymarket récent", agePoints, `Compte créé sur Polymarket il y a ${Math.round(ctx.ageDays)} jours`);
-      }
-      if (!ctx || ctx.avgTradeUsd30d === null || ctx.tradeCount30d < 3) {
-        missing.push("wallet_baseline");
-      } else {
-        // History is only the portion observed by this radar, not the wallet's complete Polymarket activity.
-        missing.push("wallet_baseline_partial");
-        const ratio = total / Math.max(ctx.avgTradeUsd30d, 1);
-        const anomalyPoints = (settings.weights.wallet_anomaly ?? 25) * clamp(Math.log10(Math.max(1, ratio)) / 2);
-        push("wallet_anomaly", "Mise inhabituelle dans l'historique observé",
-          anomalyPoints,
-          `${Math.round(total)} $ contre ${Math.round(ctx.avgTradeUsd30d)} $ par transaction observée en moyenne sur 30 jours`);
-      }
-
-      const outcomeAmounts = new Map<string, number>();
-      for (const trade of g) {
-        const outcome = trade.outcome ?? "unknown";
-        outcomeAmounts.set(outcome, (outcomeAmounts.get(outcome) ?? 0) + trade.usd_amount);
-      }
-      const dominantShare = total > 0 ? Math.max(...outcomeAmounts.values()) / total : 0;
-      if (g.length > 1) {
-        push("concentration", "Concentration sur un même résultat", (settings.weights.concentration ?? 8) * clamp((dominantShare - 0.5) / 0.5),
-          `${Math.round(dominantShare * 100)} % de la mise sur le résultat dominant`);
-      }
-      const spanMinutes = Math.max(1, (Date.parse(g[g.length-1].traded_at) - Date.parse(g[0].traded_at)) / 60000);
-      const repetition = (settings.weights.repetition ?? 15) * clamp((g.length - 1) / 5) * (1 - clamp(spanMinutes / Math.max(1, settings.group_window_minutes)));
-      push("repetition", "Achats répétés et rapprochés", repetition, `${g.length} achats sur ${spanMinutes.toFixed(1)} minutes`);
-
-      const coordinatedWallets = new Set<string>();
-      for (const t of g) {
-        const bucket = Math.floor(Date.parse(t.traded_at) / 600000);
-        const group = coordinated.get(`${condition}|${t.outcome ?? "unknown"}|${bucket}`);
-        for (const other of group ?? []) if (other !== wallet) coordinatedWallets.add(other);
-      }
-      push("coordination", "Activité simultanée entre portefeuilles",
-        (settings.weights.coordination ?? 10) * clamp(coordinatedWallets.size / 4),
-        coordinatedWallets.size ? `${coordinatedWallets.size} autres portefeuilles sur le même résultat et créneau` : "Aucun autre portefeuille simultané identifié");
-
-      const score = Math.max(0, Math.min(100, Math.round(factors.reduce((a,x)=>a+x.points,0))));
-      if (score < MIN_ALERT_SCORE) continue;
-      alerts.push({
-        dedupe_key: `${wallet}|${condition}|${g.length === 1 ? "single" : "grouped"}|${g[0].traded_at}`,
-        wallet, condition_id: condition, alert_type: g.length === 1 ? "single" : "grouped",
-        score, confidence: missing.length === 0 ? "high" : missing.length <= 1 ? "medium" : "low",
-        factors: factors.sort((a,b)=>b.points-a.points), missing_data: missing,
-        trade_ids: g.map(t=>t.trade_id), total_usd: Math.round(total*100)/100,
-        price_min: minPrice, first_trade_at: g[0].traded_at, last_trade_at: g[g.length-1].traded_at,
-      });
-    }
-  }
-  return alerts;
+  const start = Date.parse(candidate.first_trade_at) - 1000;
+  const end = Date.parse(candidate.last_trade_at) + 1000;
+  return marketHistory.filter(trade => trade.wallet === candidate.wallet.toLowerCase()
+    && trade.condition_id === candidate.condition_id
+    && normalizedOutcome(trade.outcome) === normalizedOutcome(candidate.outcome)
+    && trade.timestamp * 1000 >= start && trade.timestamp * 1000 <= end);
 }
+
+async function scoreAlertCandidate(
+  candidate: AlertCandidate,
+  localTrades: Trade[],
+  cache: ScoringCache,
+): Promise<{ row: AlertCandidate; score: number; coverage: number; factors: any[]; missing: string[]; conditions: any[]; confidence: string }> {
+  const eventTime = Date.parse(candidate.first_trade_at);
+  const marketHistoryPromise = getMarketHistory(candidate.condition_id, eventTime, cache);
+  const userHistoryPromise = getUserHistory(candidate.wallet, cache);
+  const joinDatePromise = getVerifiedJoinDate(candidate.wallet, cache);
+  const [marketHistory, userHistory, joinDate] = await Promise.all([
+    marketHistoryPromise, userHistoryPromise, joinDatePromise,
+  ]);
+  const eventTrades = historicalRowsForCandidate(candidate, localTrades, marketHistory.trades);
+  const price = candidate.price_avg ?? (eventTrades.length
+    ? eventTrades.reduce((sum, trade) => sum + trade.price * trade.usd_amount, 0)
+      / Math.max(1, eventTrades.reduce((sum, trade) => sum + trade.usd_amount, 0))
+    : null);
+  const eventEpoch = Math.floor(eventTime / 1000);
+
+  let accountAgeDays: number | null = null;
+  if (joinDate) {
+    const createdAt = Date.parse(joinDate);
+    const age = (eventTime - createdAt) / DAY_MS;
+    if (Number.isFinite(age) && age >= 0) accountAgeDays = age;
+  }
+
+  let concentrationRatio: number | null = null;
+  if (userHistory.complete) {
+    const before = userHistory.trades.filter(trade => trade.side === "BUY" && trade.timestamp < eventEpoch);
+    const allPrevious = before.reduce((sum, trade) => sum + trade.usd_amount, 0);
+    const targetPrevious = before.filter(trade =>
+      trade.condition_id === candidate.condition_id
+      && normalizedOutcome(trade.outcome) === normalizedOutcome(candidate.outcome)
+    ).reduce((sum, trade) => sum + trade.usd_amount, 0);
+    const denominator = allPrevious + candidate.total_usd;
+    if (denominator > 0) concentrationRatio = (targetPrevious + candidate.total_usd) / denominator;
+  }
+
+  let comparableAmounts: number[] | null = null;
+  const band = price == null ? -1 : priceBand(price);
+  if (marketHistory.complete && band >= 0) {
+    const prior = marketHistory.trades.filter(trade => {
+      const timestamp = trade.timestamp * 1000;
+      return trade.side === "BUY" && timestamp < eventTime
+        && priceBand(trade.price) === band;
+    });
+    const sevenDay = prior.filter(trade => trade.timestamp * 1000 >= eventTime - 7 * DAY_MS);
+    const thirtyDay = prior.filter(trade => trade.timestamp * 1000 >= eventTime - 30 * DAY_MS);
+    if (sevenDay.length >= 100) comparableAmounts = sevenDay.map(trade => trade.usd_amount);
+    else if (thirtyDay.length >= 100) comparableAmounts = thirtyDay.map(trade => trade.usd_amount);
+  }
+
+  let simultaneousOtherWallets: number | null = null;
+  let historicalSimultaneityCounts: number[] | null = null;
+  if (marketHistory.complete) {
+    const outcome = normalizedOutcome(candidate.outcome);
+    const currentPeers = new Set(marketHistory.trades.filter(trade => {
+      const time = trade.timestamp * 1000;
+      return trade.side === "BUY" && time >= eventTime - WINDOW_MS && time < eventTime
+        && normalizedOutcome(trade.outcome) === outcome
+        && trade.wallet !== candidate.wallet.toLowerCase()
+        && trade.usd_amount >= 1000;
+    }).map(trade => trade.wallet));
+    simultaneousOtherWallets = currentPeers.size;
+
+    const start = Math.floor((eventTime - 30 * DAY_MS) / WINDOW_MS) * WINDOW_MS;
+    const lastWindowStart = eventTime - 2 * WINDOW_MS;
+    const counts: number[] = [];
+    for (let windowStart = start; windowStart <= lastWindowStart; windowStart += WINDOW_MS) {
+      const peers = new Set(marketHistory.trades.filter(trade => {
+        const time = trade.timestamp * 1000;
+        return trade.side === "BUY" && time >= windowStart && time < windowStart + WINDOW_MS
+          && normalizedOutcome(trade.outcome) === outcome
+          && trade.usd_amount >= 1000;
+      }).map(trade => trade.wallet));
+      counts.push(peers.size);
+    }
+    historicalSimultaneityCounts = counts.length >= 100 ? counts : null;
+  }
+
+  const scored = calculateInformedScore({
+    totalUsd: candidate.total_usd,
+    price,
+    accountAgeDays,
+    concentrationRatio,
+    comparableAmounts,
+    simultaneousOtherWallets,
+    historicalSimultaneityCounts,
+  });
+  const confidence = scored.coverage >= 90 ? "high" : scored.coverage >= 60 ? "medium" : "low";
+  return {
+    row: { ...candidate, price_avg: price },
+    score: scored.score, coverage: scored.coverage, factors: scored.factors,
+    missing: scored.missing, conditions: scored.conditions, confidence,
+  };
+}
+
+async function persistScoredAlert(
+  candidate: AlertCandidate,
+  localTrades: Trade[],
+  cache: ScoringCache,
+  existingId?: string,
+): Promise<{ saved: boolean; deleted: boolean; score: number; coverage: number }> {
+  const result = await scoreAlertCandidate(candidate, localTrades, cache);
+  if (result.coverage === 0) return { saved: false, deleted: false, score: result.score, coverage: 0 };
+  if (result.score < DISPLAY_SCORE_MIN) {
+    if (existingId) {
+      const { error } = await db.from("alerts").delete().eq("id", existingId);
+      if (error) throw error;
+    }
+    return { saved: false, deleted: Boolean(existingId), score: result.score, coverage: result.coverage };
+  }
+
+  const payload = {
+    ...result.row, score: result.score, coverage: result.coverage,
+    model_version: MODEL_VERSION, scored_at: new Date().toISOString(),
+    conditions: result.conditions, confidence: result.confidence,
+    factors: result.factors, missing_data: result.missing,
+    source_system: existingId ? "legacy_history_rescored" : "scanner_informed_buy",
+    updated_at: new Date().toISOString(),
+  };
+  let error: any = null;
+  if (existingId) {
+    const update = await db.from("alerts").update(payload).eq("id", existingId);
+    error = update.error;
+  } else {
+    const insert = await db.from("alerts").upsert(payload, { onConflict: "dedupe_key" });
+    error = insert.error;
+  }
+  if (error) throw error;
+  return { saved: true, deleted: false, score: result.score, coverage: result.coverage };
+}
+
+async function findExistingAlert(candidate: AlertCandidate): Promise<string | undefined> {
+  const from = new Date(Date.parse(candidate.first_trade_at) - WINDOW_MS).toISOString();
+  const to = new Date(Date.parse(candidate.last_trade_at) + WINDOW_MS).toISOString();
+  const { data, error } = await db.from("alerts").select("id,trade_ids")
+    .eq("wallet", candidate.wallet).eq("condition_id", candidate.condition_id)
+    .gte("first_trade_at", from).lte("last_trade_at", to).limit(50);
+  if (error) throw error;
+  const ids = new Set(candidate.trade_ids);
+  const match = (data ?? []).find((row: any) => (row.trade_ids ?? []).some((id: string) => ids.has(id)));
+  return match?.id;
+}
+
+async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
+  const { data, error } = await db.from("alerts").select("*")
+    .is("model_version", null)
+    .order("first_trade_at", { ascending: true, nullsFirst: true })
+    .limit(limit);
+  if (error) throw error;
+  let saved = 0, deleted = 0, pending = 0;
+  for (const alert of data ?? []) {
+    const ids: string[] = alert.trade_ids ?? [];
+    let localTrades: Trade[] = [];
+    if (ids.length) {
+      const { data: rows, error: tradeError } = await db.from("trades")
+        .select("trade_id,transaction_hash,wallet,pseudonym,market_id,condition_id,token_id,side,outcome,price,size,usd_amount,traded_at")
+        .in("trade_id", ids.slice(0, 1000));
+      if (tradeError) throw tradeError;
+      localTrades = (rows ?? []) as Trade[];
+    }
+    const candidate: AlertCandidate = {
+      dedupe_key: alert.dedupe_key, wallet: alert.wallet, market_id: alert.market_id,
+      condition_id: alert.condition_id, alert_type: alert.alert_type,
+      outcome: alert.outcome, trade_ids: ids, total_usd: Number(alert.total_usd) || 0,
+      price_min: alert.price_min == null ? null : Number(alert.price_min),
+      price_avg: alert.price_avg == null ? null : Number(alert.price_avg),
+      first_trade_at: alert.first_trade_at, last_trade_at: alert.last_trade_at,
+    };
+    const result = await persistScoredAlert(candidate, localTrades, cache, alert.id);
+    if (result.saved) saved++;
+    if (result.deleted) deleted++;
+    if (!result.saved && !result.deleted) pending++;
+  }
+  return { processed: data?.length ?? 0, saved, deleted, pending };
+}
+
 
 async function syncResolvedMarkets() {
   const cutoff = new Date(Date.now()).toISOString();
@@ -438,7 +653,8 @@ Deno.serve(async (req: Request) => {
   }
   if (startError || !scan) return new Response(JSON.stringify({ error: startError?.message ?? "Scan record missing" }), { status: 500, headers: cors });
 
-  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0, v2SignalCount = 0;
+  const scoringCache = makeScoringCache();
+  const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0;
   let batchStart = 0;
   let resolvedMarketsUpdated = 0;
   let tradePagesFetched = 0;
@@ -510,13 +726,6 @@ Deno.serve(async (req: Request) => {
       });
       await Promise.all(workers);
       const unique = [...new Map(all.map(t => [t.trade_id,t])).values()]; fetched = unique.length;
-      const v2Signals = buildV2Signals(unique, settings);
-      for (let i=0; i<v2Signals.length; i+=100) {
-        const { data, error } = await db.from("scoring_v2_signals")
-          .upsert(v2Signals.slice(i,i+100), { onConflict:"dedupe_key" }).select("id");
-        if (error) errors.push(`Sauvegarde signaux V2 lot ${Math.floor(i/100)+1}: ${error.message}`);
-        else v2SignalCount += data?.length ?? 0;
-      }
       if (unique.length) {
         for (let i = 0; i < unique.length; i += 250) {
           const { data, error } = await db.from("trades")
@@ -526,77 +735,30 @@ Deno.serve(async (req: Request) => {
           else inserted += data?.length ?? 0;
         }
       }
-      const wallets = [...new Set(unique.filter(t => {
-        if (t.side !== "BUY") return false;
-        const threshold = minimumForPrice(t.price);
-        return threshold !== null && t.usd_amount >= threshold;
-      }).map(t => t.wallet))];
-      const walletContext: Record<string, WalletContext> = {};
-      if (wallets.length) {
-        const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
-        const walletRows: any[] = [];
-        const statsRows: any[] = [];
-        for (let i = 0; i < wallets.length; i += 10) {
-          const batch = wallets.slice(i, i + 10);
-          const [{ data: walletBatch, error: walletError }, { data: statsBatch, error: statsError }] = await Promise.all([
-            db.from("wallets").select("address,first_seen_at,first_platform_activity_at,created_at_verified").in("address", batch),
-            db.rpc("wallet_recent_trade_stats", { p_wallets: batch, p_since: since30d }),
-          ]);
-          if (walletError) errors.push(`Données portefeuilles: ${walletError.message}`);
-          else walletRows.push(...(walletBatch ?? []));
-          if (statsError) errors.push(`Historique portefeuilles: ${statsError.message}`);
-          else statsRows.push(...(statsBatch ?? []));
+      const cache = scoringCache;
+      const candidates = buildAlertCandidates(unique, settings.group_window_minutes)
+        .sort((a, b) => b.row.total_usd - a.row.total_usd)
+        .slice(0, 2);
+      for (const candidate of candidates) {
+        try {
+          const existingId = await findExistingAlert(candidate.row);
+          const scored = await persistScoredAlert(candidate.row, candidate.trades, cache, existingId);
+          if (scored.saved) alertCount++;
+          if (scored.deleted) errors.push(`Alerte recalculée sous 50/100 et supprimée (${candidate.row.dedupe_key})`);
+        } catch (error) {
+          errors.push(`Scoring BUY ${candidate.row.wallet}: ${(error as Error).message}`);
         }
-        const stats = new Map((statsRows ?? []).map(row => [row.wallet, row]));
-        const meta = new Map((walletRows ?? []).map(row => [row.address, row]));
-        for (let i = 0; i < wallets.length; i += 10) {
-          await Promise.all(wallets.slice(i, i + 10).map(async wallet => {
-            const row = meta.get(wallet);
-            let joinDate = row?.created_at_verified ?? null;
-            if (!joinDate) {
-              try {
-                joinDate = await getPolymarketJoinDate(wallet);
-                if (joinDate) {
-                  const { error } = await db.from("wallets").upsert({ address: wallet, created_at_verified: joinDate, updated_at: new Date().toISOString() }, { onConflict: "address" });
-                  if (error) errors.push(`Enregistrement date de création ${wallet}: ${error.message}`);
-                }
-              } catch (e) { errors.push(`Date de création Polymarket ${wallet}: ${(e as Error).message}`); }
-            }
-            const ageDays = joinDate ? Math.max(0, (Date.now() - Date.parse(joinDate)) / 86400000) : null;
-            const history = stats.get(wallet);
-            walletContext[wallet] = {
-              ageDays,
-              avgTradeUsd30d: history?.avg_trade_usd == null ? null : Number(history.avg_trade_usd),
-              tradeCount30d: Number(history?.trade_count ?? 0),
-            };
-          }));
-        }
-      }
-      const alerts = buildAlerts(unique, settings, walletContext);
-      for (let i=0; i<alerts.length; i+=100) {
-        const rows = alerts.slice(i,i+100).map(a => ({ ...a, market_id: markets.find(m => m.condition_id === a.condition_id)?.id ?? "" }));
-        const { data, error } = await db.from("alerts").upsert(rows, { onConflict: "dedupe_key" }).select("id");
-        if (error) errors.push(`Sauvegarde alertes: ${error.message}`); else alertCount += data?.length ?? 0;
       }
     }
   } catch (e) { errors.push((e as Error).message); }
-  let v2ScoresUpdated = 0, v2SignalsScored = 0;
-  const { data: v2Checkpoint, error: v2CheckpointError } = await db.from("checkpoints")
-    .select("value").eq("key","scoring_v2_last_run").maybeSingle();
-  if (v2CheckpointError) errors.push(`Lecture du checkpoint V2: ${v2CheckpointError.message}`);
-  else if (!v2Checkpoint || Math.floor(Date.now()/1000)-Number(v2Checkpoint.value) >= 300) {
-    const [legacyV2, signalV2] = await Promise.all([
-      db.rpc("refresh_alert_scores_v2"),
-      db.rpc("refresh_scoring_v2_signals"),
-    ]);
-    if (legacyV2.error) errors.push(`Scoring V2 des alertes historiques: ${legacyV2.error.message}`);
-    else v2ScoresUpdated = Number(legacyV2.data ?? 0);
-    if (signalV2.error) errors.push(`Scoring des signaux V2: ${signalV2.error.message}`);
-    else v2SignalsScored = Number(signalV2.data ?? 0);
-    const { error: checkpointWriteError } = await db.from("checkpoints").upsert({
-      key:"scoring_v2_last_run", value:Math.floor(Date.now()/1000), updated_at:new Date().toISOString()
-    },{onConflict:"key"});
-    if (checkpointWriteError) errors.push(`Enregistrement du checkpoint V2: ${checkpointWriteError.message}`);
+  let historicalRescored = 0, historicalDeleted = 0, historicalPending = 0;
+  try {
+    const backfill = await rescorePendingAlerts(scoringCache, 2);
+    historicalRescored = backfill.saved;
+    historicalDeleted = backfill.deleted;
+    historicalPending = backfill.pending;
+  } catch (error) {
+    errors.push(`Recalcul historique BUY: ${(error as Error).message}`);
   }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
   const result = {
@@ -608,8 +770,8 @@ Deno.serve(async (req: Request) => {
       markets_truncated: marketsTruncated, max_trade_pages_per_market: MAX_TRADE_PAGES,
       min_market_volume: minMarketVolume, min_market_liquidity: minMarketLiquidity,
       resolved_markets_updated: resolvedMarketsUpdated,
-      v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount,
-      v2_signals_scored: v2SignalsScored,
+      scoring_model: MODEL_VERSION, historical_alerts_rescored: historicalRescored,
+      historical_alerts_deleted_below_50: historicalDeleted, historical_alerts_pending: historicalPending,
     },
   };
   const { error: finishError } = await db.from("scans").update({
