@@ -111,7 +111,7 @@ async function getMarkets(categories: string[], caps: { perCategory: number; tot
 // Walk its opaque keyset cursor until the page reaches the scan-window boundary.
 // The 20-page guard is a last-resort runtime/memory ceiling, not the normal stop condition.
 const TRADE_PAGE_SIZE = 500;
-const MAX_TRADE_PAGES = 20;
+const MAX_TRADE_PAGES = 8;
 async function getTrades(market: any, start: number, end: number) {
   const out: Trade[] = [];
   const seenCursors = new Set<string>();
@@ -842,10 +842,22 @@ Deno.serve(async (req: Request) => {
   const { data: authorized, error: authError } = await db.rpc("validate_scan_cron_secret", { candidate: token });
   if (authError || authorized !== true) return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: cors });
 
+  // Historical rescoring runs on its own cron cadence, never inside the latency-sensitive market scan.
+  const mode = new URL(req.url).searchParams.get("mode");
+  if (mode === "backfill") {
+    try {
+      const backfill = await rescorePendingAlerts(makeScoringCache(), 2);
+      return new Response(JSON.stringify({ status: "success", ...backfill }), { status: 200, headers: cors });
+    } catch (error) {
+      console.error("[informed-scoring] backfill batch failed:", error);
+      return new Response(JSON.stringify({ status: "failed", error: (error as Error).message }), { status: 500, headers: cors });
+    }
+  }
+
   await db.from("scans").update({
     status: "failed", finished_at: new Date().toISOString(),
     errors: ["Exécution interrompue après expiration du verrou de scan (5 minutes)."]
-  }).eq("status", "running").lt("started_at", new Date(Date.now() - 5 * 60 * 1000).toISOString());
+  }).eq("status", "running").lt("started_at", new Date(Date.now() - 15 * 60 * 1000).toISOString());
 
   const { data: settingRow, error: settingsError } = await db.from("app_settings").select("data").eq("id", 1).single();
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
@@ -856,7 +868,7 @@ Deno.serve(async (req: Request) => {
     perCategory: Math.min(300, Math.max(50, Math.floor(Number((settings as any).max_markets_per_category ?? 300)))),
     total: Math.min(1500, Math.max(100, Math.floor(Number((settings as any).max_markets_total ?? 1500)))),
   };
-  const batchSize = Math.min(15, Math.max(1, Math.floor(Number((settings as any).scan_batch_size ?? 15))));
+  const batchSize = Math.min(5, Math.max(1, Math.floor(Number((settings as any).scan_batch_size ?? 5))));
   // Quality thresholds intentionally broadened to include more active, still-tradable markets.
   const minMarketVolume = Math.max(0, Number((settings as any).min_market_volume ?? 20000));
   const minMarketLiquidity = Math.max(0, Number((settings as any).min_market_liquidity ?? 2000));
@@ -930,7 +942,7 @@ Deno.serve(async (req: Request) => {
       if (checkpointError) errors.push(`Mise à jour du checkpoint: ${checkpointError.message}`);
       const all: Trade[] = [];
       let next = 0;
-      const workers = Array.from({ length: Math.min(6, markets.length) }, async () => {
+      const workers = Array.from({ length: Math.min(3, markets.length) }, async () => {
         while (next < markets.length) {
           const market = markets[next++];
           const result = await getTrades(market, start, end);
@@ -969,15 +981,6 @@ Deno.serve(async (req: Request) => {
     errors.push(`File des nouveaux candidats BUY: ${(error as Error).message}`);
   }
 
-  let historicalRescored = 0, historicalDeleted = 0, historicalPending = 0;
-  try {
-    const backfill = await rescorePendingAlerts(scoringCache, 1);
-    historicalRescored = backfill.saved;
-    historicalDeleted = backfill.deleted;
-    historicalPending = backfill.pending;
-  } catch (error) {
-    errors.push(`Recalcul historique BUY: ${(error as Error).message}`);
-  }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
   const result = {
     status, window_start: start, window_end: end,
@@ -991,8 +994,6 @@ Deno.serve(async (req: Request) => {
       scoring_model: MODEL_VERSION, queued_live_candidates: queueEnqueued,
       live_candidates_processed: queueProcessed, live_candidates_deleted_below_50: queueDeleted,
       live_candidates_pending: queuePending,
-      historical_alerts_rescored: historicalRescored,
-      historical_alerts_deleted_below_50: historicalDeleted, historical_alerts_pending: historicalPending,
     },
   };
   const { error: finishError } = await db.from("scans").update({
