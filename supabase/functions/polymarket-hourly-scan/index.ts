@@ -25,13 +25,26 @@ async function fetchJson<T>(url: string, tries = 3): Promise<T> {
   let last: unknown;
   for (let i = 0; i < tries; i++) {
     try {
-      const response = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(12000) });
-      if (response.status === 429 || response.status >= 500) {
-        last = new Error(`HTTP ${response.status}`);
-        await new Promise(r => setTimeout(r, Math.min(5000, 500 * 2 ** i)));
+      const response = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (response.status === 429 || response.status === 503 || response.status >= 500) {
+        const traceId = response.headers.get("x-trace-id");
+        last = new Error(`HTTP ${response.status}${traceId ? ` trace_id=${traceId}` : ""}`);
+        if (i < tries - 1) {
+          const retryAfterSeconds = Number(response.headers.get("retry-after"));
+          const delayMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? Math.min(10000, retryAfterSeconds * 1000)
+            : Math.min(5000, 500 * 2 ** i);
+          await new Promise(r => setTimeout(r, delayMs));
+        }
         continue;
       }
-      if (!response.ok) throw new Error(`HTTP ${response.status} pour ${url}`);
+      if (!response.ok) {
+        const traceId = response.headers.get("x-trace-id");
+        throw new Error(`HTTP ${response.status} pour ${url}${traceId ? ` (trace_id=${traceId})` : ""}`);
+      }
       return await response.json() as T;
     } catch (e) {
       last = e;
@@ -93,24 +106,43 @@ async function getMarkets(categories: string[], caps: { perCategory: number; tot
   }
   return { markets, errors };
 }
-// Max pages of trades per market per scan (500 trades per page).
-const MAX_TRADE_PAGES = 10;
+// /v2/trades?condition= ignores start/end and serves a fixed three-year feed.
+// Walk its opaque keyset cursor until the page reaches the scan-window boundary.
+// The 20-page guard is a last-resort runtime/memory ceiling, not the normal stop condition.
+const TRADE_PAGE_SIZE = 500;
+const MAX_TRADE_PAGES = 20;
 async function getTrades(market: any, start: number, end: number) {
   const out: Trade[] = [];
+  const seenCursors = new Set<string>();
   let cursor: string | undefined;
+
   for (let page = 0; page < MAX_TRADE_PAGES; page++) {
-    const q = new URLSearchParams({ condition: market.condition_id, start: String(Math.max(0, start)), end: String(end), limit: "500", taker_only: "true" });
+    // Keep identical filters across the cursor walk. start/end are intentionally omitted:
+    // Polymarket honours these only for the user-shaped feed, not the condition-shaped feed.
+    const q = new URLSearchParams({
+      condition: market.condition_id,
+      limit: String(TRADE_PAGE_SIZE),
+      taker_only: "true",
+    });
     if (cursor) q.set("cursor", cursor);
+
     let response: any;
-    try { response = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${q}`); }
-    catch (e) { return { trades: out, error: (e as Error).message, truncated: true }; }
-    let inWindow = 0;
-    for (const r of response.data ?? []) {
-      if (!r.transaction_hash || !r.proxy_wallet || !r.condition_id) continue;
+    try {
+      response = await fetchJson<any>(`https://data-api.polymarket.com/v2/trades?${q}`);
+    } catch (e) {
+      return { trades: out, pages: page + 1, error: (e as Error).message, truncated: true };
+    }
+
+    const rows = Array.isArray(response.data) ? response.data : [];
+    let oldestTimestamp = Number.POSITIVE_INFINITY;
+
+    for (const r of rows) {
       const timestamp = Number(r.timestamp);
-      // The Data API may return out-of-window records despite start/end parameters.
-      // Enforce the requested scan window locally so historical pages cannot refill raw storage.
+      if (Number.isFinite(timestamp)) oldestTimestamp = Math.min(oldestTimestamp, timestamp);
+
+      if (!r.transaction_hash || !r.proxy_wallet || !r.condition_id) continue;
       if (!Number.isFinite(timestamp) || timestamp < start || timestamp > end) continue;
+
       const price = Number(r.price), size = Number(r.size);
       if (!Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0) continue;
       const side = String(r.side).toUpperCase() === "BUY" ? "BUY" : "SELL";
@@ -121,18 +153,41 @@ async function getTrades(market: any, start: number, end: number) {
         token_id: r.token_id ?? null, side, outcome: r.outcome ?? null, price, size,
         usd_amount: Math.round(price * size * 100) / 100, traded_at: new Date(timestamp * 1000).toISOString(),
       });
-      inWindow++;
     }
-    if (inWindow === 0) {
-      // The Data API ignores the start parameter and returns full history, newest first.
-      // A page with no in-window trades means we have gone past the scan window: stop here.
-      return { trades: out, truncated: false };
+
+    // The keyset feed defaults to newest-to-oldest. Once this page crosses the lower
+    // time bound, subsequent cursors are older; the remaining three-year history is irrelevant.
+    if (oldestTimestamp < start) {
+      return { trades: out, pages: page + 1, truncated: false };
     }
+
     const hasMore = response.pagination?.has_more === true;
-    cursor = response.pagination?.next_cursor ?? undefined;
-    if (!cursor || !hasMore) return { trades: out, truncated: false };
+    const nextCursor = response.pagination?.next_cursor;
+    if (!hasMore) return { trades: out, pages: page + 1, truncated: false };
+    if (typeof nextCursor !== "string" || !nextCursor) {
+      return {
+        trades: out, pages: page + 1,
+        error: "Pagination incohérente : has_more=true sans next_cursor",
+        truncated: true,
+      };
+    }
+    if (seenCursors.has(nextCursor)) {
+      return {
+        trades: out, pages: page + 1,
+        error: "Pagination bloquée : le curseur Polymarket se répète",
+        truncated: true,
+      };
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
   }
-  return { trades: out, truncated: true };
+
+  return {
+    trades: out, pages: MAX_TRADE_PAGES,
+    error: `Plafond de sécurité atteint (${MAX_TRADE_PAGES} pages × ${TRADE_PAGE_SIZE} lignes) avant la fin de la fenêtre`,
+    truncated: true,
+  };
 }
 type WalletContext = { ageDays: number | null; avgTradeUsd30d: number | null; tradeCount30d: number };
 const MIN_ALERT_SCORE = 50;
@@ -365,17 +420,15 @@ Deno.serve(async (req: Request) => {
   if (settingsError) return new Response(JSON.stringify({ error: settingsError.message }), { status: 500, headers: cors });
   const raw = (settingRow?.data ?? {}) as Partial<Settings>;
   const settings: Settings = { ...defaults, ...raw, weights: { ...defaults.weights, ...(raw.weights ?? {}) } };
-  // Capacite de scan, parametrable via app_settings :
-  // - caps.perCategory / caps.total : plafonds du catalogue (300 / 1500)
-  // - batchSize : marches scannes par passage (15)
-  // - minMarketVolume / minMarketLiquidity : filtre qualite amont (50k / 10k)
+  // Capacity is controlled by app_settings but hard-bounded to keep each 30s run safe.
   const caps = {
-    perCategory: Number((settings as any).max_markets_per_category ?? 300),
-    total: Number((settings as any).max_markets_total ?? 1500),
+    perCategory: Math.min(300, Math.max(50, Math.floor(Number((settings as any).max_markets_per_category ?? 300)))),
+    total: Math.min(1500, Math.max(100, Math.floor(Number((settings as any).max_markets_total ?? 1500)))),
   };
-  const batchSize = Math.max(1, Number((settings as any).scan_batch_size ?? 15));
-  const minMarketVolume = Number((settings as any).min_market_volume ?? 50000);
-  const minMarketLiquidity = Number((settings as any).min_market_liquidity ?? 10000);
+  const batchSize = Math.min(15, Math.max(1, Math.floor(Number((settings as any).scan_batch_size ?? 15))));
+  // Quality thresholds intentionally broadened to include more active, still-tradable markets.
+  const minMarketVolume = Math.max(0, Number((settings as any).min_market_volume ?? 20000));
+  const minMarketLiquidity = Math.max(0, Number((settings as any).min_market_liquidity ?? 2000));
   const end = Math.floor(Date.now()/1000), start = end - 3600 - settings.scan_overlap_seconds;
   const { data: scan, error: startError } = await db.from("scans").insert({
     started_at: new Date().toISOString(), status: "running", window_start: start, window_end: end,
@@ -388,10 +441,25 @@ Deno.serve(async (req: Request) => {
   const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0, v2SignalCount = 0;
   let batchStart = 0;
   let resolvedMarketsUpdated = 0;
+  let tradePagesFetched = 0;
+  let marketsTruncated = 0;
   try {
-    const resolutionSync = await syncResolvedMarkets();
-    resolvedMarketsUpdated = resolutionSync.updated;
-    errors.push(...resolutionSync.errors);
+    // Resolution changes slowly; do not hit Gamma on every 30-second scan.
+    const { data: resolutionCheckpoint, error: resolutionCheckpointError } = await db.from("checkpoints")
+      .select("value").eq("key", "resolved_markets_last_run").maybeSingle();
+    if (resolutionCheckpointError) {
+      errors.push(`Lecture du checkpoint de résolution: ${resolutionCheckpointError.message}`);
+    } else if (!resolutionCheckpoint || end - Number(resolutionCheckpoint.value) >= 300) {
+      const resolutionSync = await syncResolvedMarkets();
+      resolvedMarketsUpdated = resolutionSync.updated;
+      errors.push(...resolutionSync.errors);
+      const { error: resolutionCheckpointWriteError } = await db.from("checkpoints").upsert({
+        key: "resolved_markets_last_run", value: end, updated_at: new Date().toISOString(),
+      }, { onConflict: "key" });
+      if (resolutionCheckpointWriteError) {
+        errors.push(`Écriture du checkpoint de résolution: ${resolutionCheckpointWriteError.message}`);
+      }
+    }
     let { data: catalogue, error: catalogueError } = await db.from("markets")
       .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
       .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
@@ -414,6 +482,7 @@ Deno.serve(async (req: Request) => {
     catalogue = (catalogue ?? [])
       .filter(m => !m.end_date || Date.parse(m.end_date) > Date.now())
       .filter(m => (Number(m.volume) || 0) >= minMarketVolume && (Number(m.liquidity) || 0) >= minMarketLiquidity)
+      .sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0))
       .slice(0, caps.total);
     targetMarkets = catalogue.length;
     if (targetMarkets > 0) {
@@ -428,13 +497,14 @@ Deno.serve(async (req: Request) => {
       if (checkpointError) errors.push(`Mise à jour du checkpoint: ${checkpointError.message}`);
       const all: Trade[] = [];
       let next = 0;
-      const workers = Array.from({ length: Math.min(8, markets.length) }, async () => {
+      const workers = Array.from({ length: Math.min(6, markets.length) }, async () => {
         while (next < markets.length) {
           const market = markets[next++];
           const result = await getTrades(market, start, end);
           all.push(...result.trades);
+          tradePagesFetched += result.pages ?? 0;
           if (result.error) errors.push(`${market.slug}: ${result.error}`);
-          if (result.truncated) errors.push(`${market.slug}: pagination tronquée après ${MAX_TRADE_PAGES} pages`);
+          if (result.truncated) marketsTruncated++;
           if (!result.error) scanned++;
         }
       });
@@ -529,7 +599,19 @@ Deno.serve(async (req: Request) => {
     if (checkpointWriteError) errors.push(`Enregistrement du checkpoint V2: ${checkpointWriteError.message}`);
   }
   const status = scanned === 0 && targetMarkets > 0 ? "failed" : errors.length ? "partial" : "success";
-  const result = { status, window_start: start, window_end: end, markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors, details: { batch_start: batchStart, batch_size: batchSize, total_markets: targetMarkets, resolved_markets_updated: resolvedMarketsUpdated, v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount, v2_signals_scored: v2SignalsScored } };
+  const result = {
+    status, window_start: start, window_end: end,
+    markets_scanned: scanned, trades_fetched: fetched, trades_new: inserted, alerts_created: alertCount, errors,
+    details: {
+      batch_start: batchStart, batch_size: batchSize, total_markets: targetMarkets,
+      trade_page_size: TRADE_PAGE_SIZE, trade_pages_fetched: tradePagesFetched,
+      markets_truncated: marketsTruncated, max_trade_pages_per_market: MAX_TRADE_PAGES,
+      min_market_volume: minMarketVolume, min_market_liquidity: minMarketLiquidity,
+      resolved_markets_updated: resolvedMarketsUpdated,
+      v2_scores_updated: v2ScoresUpdated, v2_signals_upserted: v2SignalCount,
+      v2_signals_scored: v2SignalsScored,
+    },
+  };
   const { error: finishError } = await db.from("scans").update({
     finished_at: new Date().toISOString(), ...result,
   }).eq("id", scan.id);
