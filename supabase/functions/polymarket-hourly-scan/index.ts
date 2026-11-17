@@ -547,6 +547,8 @@ async function persistScoredAlert(
     model_version: MODEL_VERSION, scored_at: new Date().toISOString(),
     conditions: result.conditions, confidence: result.confidence,
     factors: result.factors, missing_data: result.missing,
+    scoring_attempts: 0, score_last_attempt_at: new Date().toISOString(),
+    score_retry_after: null, score_last_error: null,
     source_system: existingId ? "legacy_history_rescored" : "scanner_informed_buy",
     updated_at: new Date().toISOString(),
   };
@@ -586,26 +588,28 @@ async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
     .order("first_trade_at", { ascending: true, nullsFirst: true })
     .limit(limit);
   if (error) throw error;
+
   let saved = 0, deleted = 0, pending = 0;
   for (const alert of data ?? []) {
-    const ids: string[] = alert.trade_ids ?? [];
-    let localTrades: Trade[] = [];
-    if (ids.length) {
-      const { data: rows, error: tradeError } = await db.from("trades")
-        .select("trade_id,transaction_hash,wallet,pseudonym,market_id,condition_id,token_id,side,outcome,price,size,usd_amount,traded_at")
-        .in("trade_id", ids.slice(0, 1000));
-      if (tradeError) throw tradeError;
-      localTrades = (rows ?? []) as Trade[];
-    }
-    const candidate: AlertCandidate = {
-      dedupe_key: alert.dedupe_key, wallet: alert.wallet, market_id: alert.market_id,
-      condition_id: alert.condition_id, alert_type: alert.alert_type,
-      outcome: alert.outcome, trade_ids: ids, total_usd: Number(alert.total_usd) || 0,
-      price_min: alert.price_min == null ? null : Number(alert.price_min),
-      price_avg: alert.price_avg == null ? null : Number(alert.price_avg),
-      first_trade_at: alert.first_trade_at, last_trade_at: alert.last_trade_at,
-    };
     try {
+      const ids: string[] = alert.trade_ids ?? [];
+      let localTrades: Trade[] = [];
+      if (ids.length) {
+        const { data: rows, error: tradeError } = await db.from("trades")
+          .select("trade_id,transaction_hash,wallet,pseudonym,market_id,condition_id,token_id,side,outcome,price,size,usd_amount,traded_at")
+          .in("trade_id", ids.slice(0, 1000));
+        if (tradeError) throw tradeError;
+        localTrades = (rows ?? []) as Trade[];
+      }
+      const candidate: AlertCandidate = {
+        dedupe_key: alert.dedupe_key, wallet: alert.wallet, market_id: alert.market_id,
+        condition_id: alert.condition_id, alert_type: alert.alert_type,
+        outcome: alert.outcome, trade_ids: ids, total_usd: Number(alert.total_usd) || 0,
+        price_min: alert.price_min == null ? null : Number(alert.price_min),
+        price_avg: alert.price_avg == null ? null : Number(alert.price_avg),
+        first_trade_at: alert.first_trade_at, last_trade_at: alert.last_trade_at,
+      };
+
       const result = await persistScoredAlert(candidate, localTrades, cache, alert.id);
       if (result.saved) saved++;
       if (result.deleted) deleted++;
