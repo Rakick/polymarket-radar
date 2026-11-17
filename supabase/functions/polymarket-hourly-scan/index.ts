@@ -229,8 +229,6 @@ function parseHistoryTrade(row: any): HistoryTrade | null {
   if (!wallet || !condition || !transactionHash || !Number.isFinite(timestamp)
     || !Number.isFinite(price) || !Number.isFinite(size) || price <= 0 || size <= 0
     || (side !== "BUY" && side !== "SELL")) return null;
-  const tokenId = row?.asset ?? row?.token_id ?? "";
-  const idInput = [transactionHash, wallet, tokenId, side, row.size, row.price, timestamp].join("|");
   return {
     trade_id: "", transaction_hash: transactionHash, wallet, side: side as "BUY" | "SELL",
     condition_id: condition, outcome: row?.outcome == null ? null : String(row.outcome),
@@ -387,17 +385,20 @@ function buildAlertCandidates(trades: Trade[], windowMinutes: number): Array<{ r
 }
 
 function historicalRowsForCandidate(candidate: AlertCandidate, localTrades: Trade[], marketHistory: HistoryTrade[]): HistoryTrade[] {
-  if (localTrades.length) {
-    return localTrades.map(trade => ({
-      ...trade, timestamp: Math.floor(Date.parse(trade.traded_at) / 1000),
-    }));
-  }
   const start = Date.parse(candidate.first_trade_at) - 1000;
   const end = Date.parse(candidate.last_trade_at) + 1000;
-  return marketHistory.filter(trade => trade.wallet === candidate.wallet.toLowerCase()
+  const local: HistoryTrade[] = localTrades.map(trade => ({
+    ...trade, timestamp: Math.floor(Date.parse(trade.traded_at) / 1000),
+  }));
+  const keys = new Set(local.map(trade => [
+    trade.transaction_hash, trade.wallet, trade.timestamp, trade.price, trade.size,
+  ].join("|")));
+  const recovered = marketHistory.filter(trade => trade.wallet === candidate.wallet.toLowerCase()
     && trade.condition_id === candidate.condition_id
     && normalizedOutcome(trade.outcome) === normalizedOutcome(candidate.outcome)
-    && trade.timestamp * 1000 >= start && trade.timestamp * 1000 <= end);
+    && trade.timestamp * 1000 >= start && trade.timestamp * 1000 <= end
+    && !keys.has([trade.transaction_hash, trade.wallet, trade.timestamp, trade.price, trade.size].join("|")));
+  return [...local, ...recovered];
 }
 
 async function scoreAlertCandidate(
@@ -456,26 +457,25 @@ async function scoreAlertCandidate(
   let historicalSimultaneityCounts: number[] | null = null;
   if (marketHistory.complete) {
     const outcome = normalizedOutcome(candidate.outcome);
-    const currentPeers = new Set(marketHistory.trades.filter(trade => {
-      const time = trade.timestamp * 1000;
-      return trade.side === "BUY" && time >= eventTime - WINDOW_MS && time < eventTime
-        && normalizedOutcome(trade.outcome) === outcome
-        && trade.wallet !== candidate.wallet.toLowerCase()
-        && trade.usd_amount >= 1000;
-    }).map(trade => trade.wallet));
-    simultaneousOtherWallets = currentPeers.size;
+    const targetWallet = candidate.wallet.toLowerCase();
+    const countAccounts = (windowStart: number, windowEnd: number, excludeTarget: boolean) => {
+      const totals = new Map<string, number>();
+      for (const trade of marketHistory.trades) {
+        const time = trade.timestamp * 1000;
+        if (trade.side !== "BUY" || time < windowStart || time >= windowEnd
+          || normalizedOutcome(trade.outcome) !== outcome
+          || (excludeTarget && trade.wallet === targetWallet)) continue;
+        totals.set(trade.wallet, (totals.get(trade.wallet) ?? 0) + trade.usd_amount);
+      }
+      return [...totals.values()].filter(total => total >= 1000).length;
+    };
+    simultaneousOtherWallets = countAccounts(eventTime - WINDOW_MS, eventTime, true);
 
     const start = Math.floor((eventTime - 30 * DAY_MS) / WINDOW_MS) * WINDOW_MS;
     const lastWindowStart = eventTime - 2 * WINDOW_MS;
     const counts: number[] = [];
     for (let windowStart = start; windowStart <= lastWindowStart; windowStart += WINDOW_MS) {
-      const peers = new Set(marketHistory.trades.filter(trade => {
-        const time = trade.timestamp * 1000;
-        return trade.side === "BUY" && time >= windowStart && time < windowStart + WINDOW_MS
-          && normalizedOutcome(trade.outcome) === outcome
-          && trade.usd_amount >= 1000;
-      }).map(trade => trade.wallet));
-      counts.push(peers.size);
+      counts.push(countAccounts(windowStart, windowStart + WINDOW_MS, true));
     }
     historicalSimultaneityCounts = counts.length >= 100 ? counts : null;
   }
@@ -513,7 +513,7 @@ async function persistScoredAlert(
     return { saved: false, deleted: Boolean(existingId), score: result.score, coverage: result.coverage };
   }
 
-  const payload = {
+  const payload: any = {
     ...result.row, score: result.score, coverage: result.coverage,
     model_version: MODEL_VERSION, scored_at: new Date().toISOString(),
     conditions: result.conditions, confidence: result.confidence,
@@ -523,6 +523,11 @@ async function persistScoredAlert(
   };
   let error: any = null;
   if (existingId) {
+    const { data: current, error: currentError } = await db.from("alerts")
+      .select("dedupe_key,trade_ids").eq("id", existingId).single();
+    if (currentError) throw currentError;
+    payload.dedupe_key = current.dedupe_key;
+    payload.trade_ids = [...new Set([...(current.trade_ids ?? []), ...(candidate.trade_ids ?? [])])];
     const update = await db.from("alerts").update(payload).eq("id", existingId);
     error = update.error;
   } else {
