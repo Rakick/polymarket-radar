@@ -467,24 +467,44 @@ async function scoreAlertCandidate(
   if (marketHistory.complete) {
     const outcome = normalizedOutcome(candidate.outcome);
     const targetWallet = candidate.wallet.toLowerCase();
-    const countAccounts = (windowStart: number, windowEnd: number, excludeTarget: boolean) => {
-      const totals = new Map<string, number>();
-      for (const trade of marketHistory.trades) {
-        const time = trade.timestamp * 1000;
-        if (trade.side !== "BUY" || time < windowStart || time >= windowEnd
-          || normalizedOutcome(trade.outcome) !== outcome
-          || (excludeTarget && trade.wallet === targetWallet)) continue;
-        totals.set(trade.wallet, (totals.get(trade.wallet) ?? 0) + trade.usd_amount);
-      }
-      return [...totals.values()].filter(total => total >= 1000).length;
-    };
-    simultaneousOtherWallets = countAccounts(eventTime - WINDOW_MS, eventTime, true);
+    const comparableTrades = marketHistory.trades.filter(trade =>
+      trade.side === "BUY"
+      && normalizedOutcome(trade.outcome) === outcome
+      && trade.wallet !== targetWallet
+    );
 
-    const start = Math.floor((eventTime - 30 * DAY_MS) / WINDOW_MS) * WINDOW_MS;
-    const lastWindowStart = eventTime - 2 * WINDOW_MS;
+    // Build per-window wallet totals once. The former implementation rescanned the
+    // entire 30-day history for each of ~1,440 windows (O(trades × windows)).
+    const currentTotals = new Map<string, number>();
+    const baselineByWindow = new Map<number, Map<string, number>>();
+    const baselineStart = Math.floor((eventTime - 30 * DAY_MS) / WINDOW_MS) * WINDOW_MS;
+    const lastWindowStart = Math.floor((eventTime - WINDOW_MS) / WINDOW_MS) * WINDOW_MS - WINDOW_MS;
+    const baselineEnd = lastWindowStart + WINDOW_MS;
+
+    for (const trade of comparableTrades) {
+      const time = trade.timestamp * 1000;
+      if (time >= eventTime - WINDOW_MS && time < eventTime) {
+        currentTotals.set(trade.wallet, (currentTotals.get(trade.wallet) ?? 0) + trade.usd_amount);
+      }
+      if (time >= baselineStart && time < baselineEnd) {
+        const windowStart = Math.floor(time / WINDOW_MS) * WINDOW_MS;
+        let walletTotals = baselineByWindow.get(windowStart);
+        if (!walletTotals) {
+          walletTotals = new Map<string, number>();
+          baselineByWindow.set(windowStart, walletTotals);
+        }
+        walletTotals.set(trade.wallet, (walletTotals.get(trade.wallet) ?? 0) + trade.usd_amount);
+      }
+    }
+
+    const qualifyingWallets = (totals?: Map<string, number>) =>
+      [...(totals?.values() ?? [])].filter(total => total >= 1000).length;
+    simultaneousOtherWallets = qualifyingWallets(currentTotals);
+
     const counts: number[] = [];
-    for (let windowStart = start; windowStart <= lastWindowStart; windowStart += WINDOW_MS) {
-      counts.push(countAccounts(windowStart, windowStart + WINDOW_MS, true));
+    for (let windowStart = baselineStart; windowStart <= lastWindowStart; windowStart += WINDOW_MS) {
+      // Explicitly materialize empty market windows as zero-activity observations.
+      counts.push(qualifyingWallets(baselineByWindow.get(windowStart)));
     }
     historicalSimultaneityCounts = counts.length >= 100 ? counts : null;
   }
@@ -593,6 +613,131 @@ async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
 }
 
 
+async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; trades: Trade[] }>) {
+  let enqueued = 0;
+  for (const { row } of candidates) {
+    const { data: existing, error: lookupError } = await db
+      .from("informed_buy_candidate_queue")
+      .select("candidate,status")
+      .eq("dedupe_key", row.dedupe_key)
+      .maybeSingle();
+    if (lookupError) throw lookupError;
+
+    if (!existing) {
+      const { error } = await db.from("informed_buy_candidate_queue").insert({
+        dedupe_key: row.dedupe_key,
+        candidate: row,
+        status: "pending",
+        attempts: 0,
+        updated_at: new Date().toISOString(),
+      });
+      if (error && error.code !== "23505") throw error;
+      enqueued++;
+      continue;
+    }
+
+    const previous = existing.candidate as AlertCandidate;
+    const previousIds = new Set(previous?.trade_ids ?? []);
+    const mergedIds = [...new Set([...(previous?.trade_ids ?? []), ...(row.trade_ids ?? [])])];
+    const hasNewTrades = mergedIds.some(id => !previousIds.has(id));
+    if (existing.status === "done" && !hasNewTrades) continue;
+
+    const merged: AlertCandidate = {
+      ...previous,
+      ...row,
+      trade_ids: mergedIds,
+      total_usd: Math.max(Number(previous?.total_usd) || 0, row.total_usd),
+      price_min: previous?.price_min == null ? row.price_min
+        : row.price_min == null ? previous.price_min
+        : Math.min(previous.price_min, row.price_min),
+      first_trade_at: previous?.first_trade_at && Date.parse(previous.first_trade_at) < Date.parse(row.first_trade_at)
+        ? previous.first_trade_at : row.first_trade_at,
+      last_trade_at: previous?.last_trade_at && Date.parse(previous.last_trade_at) > Date.parse(row.last_trade_at)
+        ? previous.last_trade_at : row.last_trade_at,
+    };
+    const { error } = await db.from("informed_buy_candidate_queue")
+      .update({
+        candidate: merged,
+        status: "pending",
+        last_error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("dedupe_key", row.dedupe_key);
+    if (error) throw error;
+    enqueued++;
+  }
+  return enqueued;
+}
+
+async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
+  const { data, error } = await db.from("informed_buy_candidate_queue")
+    .select("id,dedupe_key,candidate,attempts")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true })
+    .limit(limit);
+  if (error) throw error;
+
+  let saved = 0, deleted = 0, completed = 0, pending = 0;
+  for (const queued of data ?? []) {
+    try {
+      const candidate = queued.candidate as AlertCandidate;
+      if (!candidate?.wallet || !candidate.condition_id || !candidate.first_trade_at) {
+        throw new Error("Candidat incomplet dans la file persistante");
+      }
+      let localTrades: Trade[] = [];
+      const ids = candidate.trade_ids ?? [];
+      if (ids.length) {
+        const { data: rows, error: tradeError } = await db.from("trades")
+          .select("trade_id,transaction_hash,wallet,pseudonym,market_id,condition_id,token_id,side,outcome,price,size,usd_amount,traded_at")
+          .in("trade_id", ids.slice(0, 1000));
+        if (tradeError) throw tradeError;
+        localTrades = (rows ?? []) as Trade[];
+      }
+
+      const existingId = await findExistingAlert(candidate);
+      const result = await persistScoredAlert(candidate, localTrades, cache, existingId);
+      if (result.coverage > 0) {
+        const { error: doneError } = await db.from("informed_buy_candidate_queue")
+          .update({ status: "done", last_error: null, updated_at: new Date().toISOString() })
+          .eq("id", queued.id);
+        if (doneError) throw doneError;
+        if (result.saved) saved++;
+        if (result.deleted) deleted++;
+        completed++;
+      } else {
+        const { error: retryError } = await db.from("informed_buy_candidate_queue")
+          .update({
+            attempts: (Number(queued.attempts) || 0) + 1,
+            last_error: "Couverture de score nulle : candidat conservé pour une nouvelle tentative.",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", queued.id);
+        if (retryError) throw retryError;
+        pending++;
+      }
+    } catch (error) {
+      const { error: retryError } = await db.from("informed_buy_candidate_queue")
+        .update({
+          attempts: (Number(queued.attempts) || 0) + 1,
+          last_error: (error as Error).message.slice(0, 1000),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", queued.id);
+      if (retryError) console.error("[informed-scoring] queue retry update failed", retryError);
+      pending++;
+    }
+  }
+
+  // Keep a finite deduplication horizon while retaining completed keys long enough
+  // to prevent rescoring the same rolling scan windows repeatedly.
+  const cutoff = new Date(Date.now() - 90 * DAY_MS).toISOString();
+  const { error: cleanupError } = await db.from("informed_buy_candidate_queue")
+    .delete().eq("status", "done").lt("updated_at", cutoff);
+  if (cleanupError) console.error("[informed-scoring] queue cleanup failed", cleanupError);
+
+  return { processed: data?.length ?? 0, saved, deleted, completed, pending };
+}
+
 async function syncResolvedMarkets() {
   const cutoff = new Date(Date.now()).toISOString();
   const { data: candidates, error } = await db.from("markets")
@@ -669,6 +814,7 @@ Deno.serve(async (req: Request) => {
 
   const scoringCache = makeScoringCache();
   const errors: string[] = []; let scanned = 0, fetched = 0, inserted = 0, alertCount = 0, targetMarkets = 0;
+  let queueEnqueued = 0, queueProcessed = 0, queueDeleted = 0, queuePending = 0;
   let batchStart = 0;
   let resolvedMarketsUpdated = 0;
   let tradePagesFetched = 0;
@@ -749,25 +895,26 @@ Deno.serve(async (req: Request) => {
           else inserted += data?.length ?? 0;
         }
       }
-      const cache = scoringCache;
       const candidates = buildAlertCandidates(unique, settings.group_window_minutes)
-        .sort((a, b) => b.row.total_usd - a.row.total_usd)
-        .slice(0, 2);
-      for (const candidate of candidates) {
-        try {
-          const existingId = await findExistingAlert(candidate.row);
-          const scored = await persistScoredAlert(candidate.row, candidate.trades, cache, existingId);
-          if (scored.saved) alertCount++;
-          if (scored.deleted) errors.push(`Alerte recalculée sous 50/100 et supprimée (${candidate.row.dedupe_key})`);
-        } catch (error) {
-          errors.push(`Scoring BUY ${candidate.row.wallet}: ${(error as Error).message}`);
-        }
-      }
+        .sort((a, b) => b.row.total_usd - a.row.total_usd);
+      // Enqueue every candidate before processing a bounded batch. No live signal
+      // is silently discarded when a scan discovers more than the worker can score.
+      queueEnqueued = await enqueueAlertCandidates(candidates);
     }
   } catch (e) { errors.push((e as Error).message); }
+  try {
+    const liveQueue = await processQueuedCandidates(scoringCache, 1);
+    alertCount = liveQueue.saved;
+    queueProcessed = liveQueue.completed;
+    queueDeleted = liveQueue.deleted;
+    queuePending = liveQueue.pending;
+  } catch (error) {
+    errors.push(`File des nouveaux candidats BUY: ${(error as Error).message}`);
+  }
+
   let historicalRescored = 0, historicalDeleted = 0, historicalPending = 0;
   try {
-    const backfill = await rescorePendingAlerts(scoringCache, 2);
+    const backfill = await rescorePendingAlerts(scoringCache, 1);
     historicalRescored = backfill.saved;
     historicalDeleted = backfill.deleted;
     historicalPending = backfill.pending;
@@ -784,7 +931,10 @@ Deno.serve(async (req: Request) => {
       markets_truncated: marketsTruncated, max_trade_pages_per_market: MAX_TRADE_PAGES,
       min_market_volume: minMarketVolume, min_market_liquidity: minMarketLiquidity,
       resolved_markets_updated: resolvedMarketsUpdated,
-      scoring_model: MODEL_VERSION, historical_alerts_rescored: historicalRescored,
+      scoring_model: MODEL_VERSION, queued_live_candidates: queueEnqueued,
+      live_candidates_processed: queueProcessed, live_candidates_deleted_below_50: queueDeleted,
+      live_candidates_pending: queuePending,
+      historical_alerts_rescored: historicalRescored,
       historical_alerts_deleted_below_50: historicalDeleted, historical_alerts_pending: historicalPending,
     },
   };
