@@ -147,7 +147,7 @@ export default function Dashboard() {
                 <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
                   <div className="score-column"><span className="score-caption">SCORE UNIQUE</span><strong className={scoreClass(alert.score)}>{alert.score}</strong><span className="score-outof">/100</span></div>
                   <div className="alert-main">
-                    <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className="side-buy">Achat · {alert.outcome || "Résultat inconnu"}</span></div>
+                    <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className="side-buy">Achat · {alert.outcome || alert.trades?.find(trade => trade.outcome)?.outcome || "Résultat inconnu"}</span></div>
                     <div className="alert-meta"><span>{alert.alert_type === "grouped" ? "◉ Achats groupés" : "◉ Achat isolé"}</span><span>Portefeuille <code>{shortWallet(alert.wallet)}</code></span><span>{date(alert.first_trade_at)}</span><span>Couverture {alert.coverage}%</span></div>
                     <div className="alert-tags">{(alert.factors ?? []).filter(factor => factor.available).slice(0, 3).map(factor => <span key={factor.code}>{factor.label} <b>{Number(factor.subscore ?? 0).toFixed(0)}/100</b></span>)}</div>
                   </div>
