@@ -301,7 +301,10 @@ function getUserHistory(wallet: string, cache: ScoringCache): Promise<HistoryRes
 }
 
 function getMarketHistory(condition: string, eventTimeMs: number, cache: ScoringCache): Promise<HistoryResult> {
-  const key = condition.toLowerCase();
+  // The fetched history stops 30 days before this alert's timestamp. Cache keys
+  // therefore include the event time; sharing only by condition can truncate an
+  // earlier alert's 30-day baseline if a later alert populates the cache first.
+  const key = `${condition.toLowerCase()}:${Math.floor(eventTimeMs / 1000)}`;
   if (!cache.markets.has(key)) {
     cache.markets.set(key, fetchTradeHistory({
       condition, side: "BUY", taker_only: "false",
