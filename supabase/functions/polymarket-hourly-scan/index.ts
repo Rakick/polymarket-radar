@@ -582,6 +582,7 @@ async function findExistingAlert(candidate: AlertCandidate): Promise<string | un
 async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
   const { data, error } = await db.from("alerts").select("*")
     .is("model_version", null)
+    .or(`score_retry_after.is.null,score_retry_after.lt.${new Date().toISOString()}`)
     .order("first_trade_at", { ascending: true, nullsFirst: true })
     .limit(limit);
   if (error) throw error;
@@ -604,10 +605,31 @@ async function rescorePendingAlerts(cache: ScoringCache, limit = 2) {
       price_avg: alert.price_avg == null ? null : Number(alert.price_avg),
       first_trade_at: alert.first_trade_at, last_trade_at: alert.last_trade_at,
     };
-    const result = await persistScoredAlert(candidate, localTrades, cache, alert.id);
-    if (result.saved) saved++;
-    if (result.deleted) deleted++;
-    if (!result.saved && !result.deleted) pending++;
+    try {
+      const result = await persistScoredAlert(candidate, localTrades, cache, alert.id);
+      if (result.saved) saved++;
+      if (result.deleted) deleted++;
+      if (!result.saved && !result.deleted) {
+        const { error: retryError } = await db.from("alerts").update({
+          scoring_attempts: (Number(alert.scoring_attempts) || 0) + 1,
+          score_last_attempt_at: new Date().toISOString(),
+          score_retry_after: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+          score_last_error: "Couverture de score nulle : alerte conservée en attente.",
+        }).eq("id", alert.id);
+        if (retryError) throw retryError;
+        pending++;
+      }
+    } catch (scoreError) {
+      const { error: retryError } = await db.from("alerts").update({
+        scoring_attempts: (Number(alert.scoring_attempts) || 0) + 1,
+        score_last_attempt_at: new Date().toISOString(),
+        score_retry_after: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
+        score_last_error: (scoreError as Error).message.slice(0, 1000),
+      }).eq("id", alert.id);
+      if (retryError) throw retryError;
+      console.error(`[informed-scoring] historical alert ${alert.id} deferred: ${(scoreError as Error).message}`);
+      pending++;
+    }
   }
   return { processed: data?.length ?? 0, saved, deleted, pending };
 }
@@ -629,6 +651,7 @@ async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; t
         candidate: row,
         status: "pending",
         attempts: 0,
+        next_attempt_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
       if (error && error.code !== "23505") throw error;
@@ -659,6 +682,7 @@ async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; t
       .update({
         candidate: merged,
         status: "pending",
+        next_attempt_at: new Date().toISOString(),
         last_error: null,
         updated_at: new Date().toISOString(),
       })
@@ -673,6 +697,7 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
   const { data, error } = await db.from("informed_buy_candidate_queue")
     .select("id,dedupe_key,candidate,attempts")
     .eq("status", "pending")
+    .lte("next_attempt_at", new Date().toISOString())
     .order("created_at", { ascending: true })
     .limit(limit);
   if (error) throw error;
@@ -708,6 +733,7 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
         const { error: retryError } = await db.from("informed_buy_candidate_queue")
           .update({
             attempts: (Number(queued.attempts) || 0) + 1,
+            next_attempt_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
             last_error: "Couverture de score nulle : candidat conservé pour une nouvelle tentative.",
             updated_at: new Date().toISOString(),
           })
@@ -719,6 +745,7 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
       const { error: retryError } = await db.from("informed_buy_candidate_queue")
         .update({
           attempts: (Number(queued.attempts) || 0) + 1,
+          next_attempt_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(),
           last_error: (error as Error).message.slice(0, 1000),
           updated_at: new Date().toISOString(),
         })
