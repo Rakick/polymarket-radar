@@ -996,15 +996,22 @@ Deno.serve(async (req: Request) => {
         errors.push(`Écriture du checkpoint de résolution: ${resolutionCheckpointWriteError.message}`);
       }
     }
-    let { data: catalogue, error: catalogueError } = await db.from("markets")
-      .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
-      .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
-      .order("volume", { ascending: false, nullsFirst: false }).limit(2000);
-    if (catalogueError) throw new Error(`Lecture du catalogue: ${catalogueError.message}`);
-    const latest = (catalogue ?? []).reduce((max, m) => Math.max(max, Date.parse(m.updated_at ?? "1970-01-01")), 0);
-    const presentCategories = new Set((catalogue ?? []).map(m => m.category));
-    const missingCategory = settings.categories.some(category => !presentCategories.has(category));
-    const needsRefresh = !catalogue?.length || missingCategory || Date.now() - latest > 55 * 60 * 1000;
+    // Vérifie la fraîcheur du catalogue sans transférer ses milliers de lignes.
+    const [latestResult, categoryChecks] = await Promise.all([
+      db.from("markets").select("updated_at").in("category", settings.categories)
+        .order("updated_at", { ascending: false }).limit(1).maybeSingle(),
+      Promise.all(settings.categories.map(category =>
+        db.from("markets").select("id", { count: "exact", head: true })
+          .eq("closed", false).eq("accepting_orders", true).eq("category", category)
+      )),
+    ]);
+    if (latestResult.error) throw new Error(`Vérification fraîcheur catalogue: ${latestResult.error.message}`);
+    const categoryError = categoryChecks.find(result => result.error)?.error;
+    if (categoryError) throw new Error(`Vérification catégories catalogue: ${categoryError.message}`);
+    const missingCategory = categoryChecks.some(result => (result.count ?? 0) === 0);
+    const latest = Date.parse(latestResult.data?.updated_at ?? "1970-01-01");
+    const needsRefresh = !latestResult.data || missingCategory || Date.now() - latest > 55 * 60 * 1000;
+    let refreshedCatalogue: any[] | null = null;
     if (needsRefresh) {
       const gamma = await getMarkets(settings.categories, caps);
       errors.push(...gamma.errors);
@@ -1012,20 +1019,43 @@ Deno.serve(async (req: Request) => {
         const { error } = await db.from("markets").upsert(gamma.markets.slice(i,i+100), { onConflict: "id" });
         if (error) errors.push(`Sauvegarde marchés lot ${i/100+1}: ${error.message}`);
       }
-      catalogue = gamma.markets;
+      refreshedCatalogue = gamma.markets;
     }
-    // Priorisation par volume (proxy d'activite) + filtre qualite amont.
-    catalogue = (catalogue ?? [])
-      .filter(m => !m.end_date || Date.parse(m.end_date) > Date.now())
-      .filter(m => (Number(m.volume) || 0) >= minMarketVolume && (Number(m.liquidity) || 0) >= minMarketLiquidity)
-      .sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0))
-      .slice(0, caps.total);
-    targetMarkets = catalogue.length;
+    // Les filtres, le classement par volume et la limite globale restent identiques.
+    if (refreshedCatalogue) {
+      refreshedCatalogue = refreshedCatalogue
+        .filter(m => !m.end_date || Date.parse(m.end_date) > Date.now())
+        .filter(m => (Number(m.volume) || 0) >= minMarketVolume && (Number(m.liquidity) || 0) >= minMarketLiquidity)
+        .sort((a, b) => (Number(b.volume) || 0) - (Number(a.volume) || 0))
+        .slice(0, caps.total);
+      targetMarkets = refreshedCatalogue.length;
+    } else {
+      const { count, error: countError } = await db.from("markets")
+        .select("id", { count: "exact", head: true })
+        .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
+        .or(`end_date.is.null,end_date.gt.${new Date().toISOString()}`)
+        .gte("volume", minMarketVolume).gte("liquidity", minMarketLiquidity);
+      if (countError) throw new Error(`Comptage catalogue éligible: ${countError.message}`);
+      targetMarkets = Math.min(count ?? 0, caps.total);
+    }
     if (targetMarkets > 0) {
       const { data: checkpoint } = await db.from("checkpoints").select("value").eq("key", "trades_checkpoint").maybeSingle();
       batchStart = Number(checkpoint?.value ?? 0);
       if (!Number.isFinite(batchStart) || batchStart < 0 || batchStart >= targetMarkets) batchStart = 0;
-      const markets = catalogue.slice(batchStart, batchStart + batchSize);
+      let markets: any[];
+      if (refreshedCatalogue) {
+        markets = refreshedCatalogue.slice(batchStart, batchStart + batchSize);
+      } else {
+        const { data: page, error: pageError } = await db.from("markets")
+          .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
+          .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
+          .or(`end_date.is.null,end_date.gt.${new Date().toISOString()}`)
+          .gte("volume", minMarketVolume).gte("liquidity", minMarketLiquidity)
+          .order("volume", { ascending: false, nullsFirst: false })
+          .range(batchStart, batchStart + batchSize - 1);
+        if (pageError) throw new Error(`Lecture lot catalogue: ${pageError.message}`);
+        markets = page ?? [];
+      }
       const nextOffset = (batchStart + markets.length) % targetMarkets;
       const { error: checkpointError } = await db.from("checkpoints").upsert({
         key: "trades_checkpoint", value: nextOffset, updated_at: new Date().toISOString()
