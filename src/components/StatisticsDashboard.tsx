@@ -118,8 +118,8 @@ export default function StatisticsDashboard() {
           <div className="section-heading"><div><span className="eyebrow">ALERT OUTCOMES</span><h2>Résultats des alertes</h2><p>Classement des alertes selon le résultat final du marché. Les marchés non clôturés ou dont l’issue ne peut pas être rapprochée restent non résolus.</p></div></div>
           <div className="stats-kpi-grid">
             <article><span>Total des alertes</span><strong>{loading ? "—" : fmt(analytics.count)}</strong></article>
-            <article><span>Alertes vraies · gagnantes</span><strong>{loading ? "—" : fmt(analytics.trueResults)}</strong></article>
-            <article><span>Alertes fausses · perdantes</span><strong>{loading ? "—" : fmt(analytics.falseResults)}</strong></article>
+            <button type="button" className="stats-kpi-click won" aria-pressed={resultFilter === "good"} onClick={() => { setResultFilter(resultFilter === "good" ? null : "good"); setExpandedResult(null); }}><span>Alertes vraies · gagnantes</span><strong>{loading ? "—" : fmt(analytics.trueResults)}</strong><small>Cliquer pour voir les paris</small></button>
+            <button type="button" className="stats-kpi-click lost" aria-pressed={resultFilter === "false"} onClick={() => { setResultFilter(resultFilter === "false" ? null : "false"); setExpandedResult(null); }}><span>Alertes fausses · perdantes</span><strong>{loading ? "—" : fmt(analytics.falseResults)}</strong><small>Cliquer pour voir les paris</small></button>
             <article><span>Non résolues</span><strong>{loading ? "—" : fmt(analytics.pendingResults)}</strong></article>
           </div>
           <div className="stats-note">Le total correspond aux alertes qualifiées chargées (maximum 500). Une alerte n’est classée qu’après clôture du marché et identification de l’issue achetée.</div>
