@@ -505,11 +505,18 @@ async function persistScoredAlert(
   existingId?: string,
 ): Promise<{ saved: boolean; deleted: boolean; score: number; coverage: number }> {
   if (Number(candidate.total_usd) < MIN_ALERT_USD) {
+    let deleted = false;
     if (existingId) {
-      const { error } = await db.from("alerts").delete().eq("id", existingId);
-      if (error) throw error;
+      const { data: existing, error: lookupError } = await db.from("alerts")
+        .select("total_usd").eq("id", existingId).maybeSingle();
+      if (lookupError) throw lookupError;
+      if (existing && Number(existing.total_usd) < MIN_ALERT_USD) {
+        const { error } = await db.from("alerts").delete().eq("id", existingId);
+        if (error) throw error;
+        deleted = true;
+      }
     }
-    return { saved: false, deleted: Boolean(existingId), score: 0, coverage: 0 };
+    return { saved: false, deleted, score: 0, coverage: 0 };
   }
   const result = await scoreAlertCandidate(candidate, localTrades, cache);
   if (result.coverage === 0) return { saved: false, deleted: false, score: result.score, coverage: 0 };
@@ -795,9 +802,14 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
       if (Number(candidate.total_usd) < MIN_ALERT_USD) {
         const existingId = await findExistingAlert(candidate);
         if (existingId) {
-          const { error: deleteError } = await db.from("alerts").delete().eq("id", existingId);
-          if (deleteError) throw deleteError;
-          deleted++;
+          const { data: existingAlert, error: lookupError } = await db.from("alerts")
+            .select("total_usd").eq("id", existingId).maybeSingle();
+          if (lookupError) throw lookupError;
+          if (existingAlert && Number(existingAlert.total_usd) < MIN_ALERT_USD) {
+            const { error: deleteError } = await db.from("alerts").delete().eq("id", existingId);
+            if (deleteError) throw deleteError;
+            deleted++;
+          }
         }
         const { error: doneError } = await db.from("informed_buy_candidate_queue")
           .update({ status: "done", last_error: null, updated_at: new Date().toISOString() })
