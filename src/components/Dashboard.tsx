@@ -101,13 +101,16 @@ export default function Dashboard() {
       const key = `${alert.condition_id || alert.market_id}::${outcome}`;
       groups.set(key, [...(groups.get(key) ?? []), alert]);
     }
-    return [...groups.entries()].map(([key, items]) => ({
-      key,
-      alerts: items,
-      top: items[0],
-      totalUsd: items.reduce((sum, item) => sum + Number(item.total_usd || 0), 0),
-      wallets: new Set(items.map(item => item.wallet)).size,
-    })).sort((a, b) => Number(b.top.score || 0) - Number(a.top.score || 0));
+    return [...groups.entries()].map(([key, items]) => {
+      const ranked = [...items].sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+      return {
+        key,
+        alerts: ranked,
+        top: ranked[0],
+        totalUsd: ranked.reduce((sum, item) => sum + Number(item.total_usd || 0), 0),
+        wallets: new Set(ranked.map(item => item.wallet)).size,
+      };
+    }).sort((a, b) => Number(b.top.score || 0) - Number(a.top.score || 0));
   }, [visibleAlerts]);
 
   const uniqueWallets = new Set(alerts.map(alert => alert.wallet)).size;
