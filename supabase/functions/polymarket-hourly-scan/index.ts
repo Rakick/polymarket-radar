@@ -621,7 +621,6 @@ async function rescorePendingAlerts(cache: ScoringCache, limit = 8) {
 async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; trades: Trade[] }>) {
   let enqueued = 0;
   for (const { row } of candidates) {
-    if (Number(row.total_usd) < MIN_ALERT_USD) continue;
     const { data: existing, error: lookupError } = await db
       .from("informed_buy_candidate_queue")
       .select("candidate,status")
