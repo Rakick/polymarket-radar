@@ -4,12 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { browserClient } from "@/lib/supabase";
 import MonitoringPanel from "@/components/MonitoringPanel";
 
-type Factor = { code: string; label: string; weight: number; available: boolean; contribution: number; subscore: number | null };
+type Factor = { code: string; label: string; weight: number; available: boolean; contribution: number; subscore: number | null; detail?: string };
 type Alert = {
   id: string; score: number; coverage: number; total_usd: number; alert_type: string;
   model_version: string | null; created_at: string; first_trade_at: string | null; result: boolean | null;
-  market: { category: string | null; question: string } | null; factors: Factor[];
-  missing_data: string[]; conditions: { value: boolean | null }[];
+  wallet: string; market_id: string; condition_id: string; outcome: string | null; price_min: number | null; price_avg: number | null;
+  market: { category: string | null; question: string; url?: string; end_date?: string | null } | null; factors: Factor[];
+  missing_data: string[]; conditions: { code?: string; label?: string; value: boolean | null; detail?: string }[];
+  trades: { trade_id: string; transaction_hash: string; side: string; outcome: string | null; price: number; usd_amount: number; traded_at: string }[];
 };
 
 const fmt = (n: number) => new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 }).format(n);
@@ -20,6 +22,8 @@ export default function StatisticsDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [resultFilter, setResultFilter] = useState<"good" | "false" | null>(null);
+  const [expandedResult, setExpandedResult] = useState<string | null>(null);
 
   useEffect(() => {
     const saved = window.localStorage.getItem("radar-theme");
@@ -78,6 +82,7 @@ export default function StatisticsDashboard() {
   }, [alerts]);
 
   const maxBucket = Math.max(1, ...analytics.buckets.map(b => b.count));
+  const resultAlerts = alerts.filter(alert => resultFilter === "good" ? alert.result === true : alert.result === false);
   const maxCategory = Math.max(1, ...analytics.categories.map(([,n]) => n));
 
   return (
@@ -118,6 +123,31 @@ export default function StatisticsDashboard() {
             <article><span>Non résolues</span><strong>{loading ? "—" : fmt(analytics.pendingResults)}</strong></article>
           </div>
           <div className="stats-note">Le total correspond aux alertes qualifiées chargées (maximum 500). Une alerte n’est classée qu’après clôture du marché et identification de l’issue achetée.</div>
+          <div className="outcome-drilldown">
+            <p className="outcome-drilldown-hint">Cliquez sur un résultat pour afficher les paris concernés, puis ouvrez une alerte pour retrouver le détail complet du scoring et des transactions.</p>
+            <div className="outcome-filter-actions">
+              <button type="button" className={resultFilter === "good" ? "outcome-filter-button selected won" : "outcome-filter-button won"} onClick={() => { setResultFilter(resultFilter === "good" ? null : "good"); setExpandedResult(null); }}>Voir les {analytics.trueResults} résultats bons</button>
+              <button type="button" className={resultFilter === "false" ? "outcome-filter-button selected lost" : "outcome-filter-button lost"} onClick={() => { setResultFilter(resultFilter === "false" ? null : "false"); setExpandedResult(null); }}>Voir les {analytics.falseResults} résultats faux</button>
+            </div>
+            {resultFilter && <div className="outcome-history">
+              <div className="outcome-history-toolbar"><strong>{resultFilter === "good" ? "Paris gagnants" : "Paris perdants"} · {resultAlerts.length}</strong><button type="button" className="text-action" onClick={() => { setResultFilter(null); setExpandedResult(null); }}>Fermer</button></div>
+              {resultAlerts.length ? resultAlerts.map(alert => <article className="outcome-detail-item" key={alert.id}>
+                <button type="button" className="outcome-detail-summary" onClick={() => setExpandedResult(expandedResult === alert.id ? null : alert.id)} aria-expanded={expandedResult === alert.id}>
+                  <span className="outcome-result-score">{alert.score}/100</span><span className="outcome-detail-title"><strong>{alert.market?.question || "Marché non retrouvé"}</strong><small>{alert.outcome || "Résultat acheté non renseigné"} · {usd(alert.total_usd)} · {new Date(alert.first_trade_at || alert.created_at).toLocaleDateString("fr-FR")}</small></span><span className={resultFilter === "good" ? "outcome-result won" : "outcome-result lost"}>{resultFilter === "good" ? "Bon" : "Faux"} {expandedResult === alert.id ? "−" : "+"}</span>
+                </button>
+                {expandedResult === alert.id && <div className="outcome-detail-body">
+                  <div className="outcome-detail-links"><span>Portefeuille : <code>{alert.wallet}</code></span>{alert.market?.url && <a className="text-action" href={alert.market.url} target="_blank" rel="noreferrer">Ouvrir le pari ↗</a>}<a className="text-action" href={`https://polymarket.com/profile/${encodeURIComponent(alert.wallet)}`} target="_blank" rel="noreferrer">Profil Polymarket ↗</a></div>
+                  <div className="outcome-detail-metrics"><span>Score <b>{alert.score}/100</b></span><span>Couverture <b>{fmt(alert.coverage)}%</b></span><span>Montant <b>{usd(alert.total_usd)}</b></span><span>Fin du pari <b>{alert.market?.end_date ? new Date(alert.market.end_date).toLocaleString("fr-FR") : "—"}</b></span></div>
+                  <h4>Détail du scoring</h4>
+                  <div className="outcome-factor-list">{(alert.factors || []).map(factor => <div className="outcome-factor-row" key={factor.code}><span><strong>{factor.label}</strong><small>{factor.detail || (factor.available ? "Donnée disponible" : "Donnée indisponible")}</small></span><b>{factor.available ? fmt(factor.subscore ?? 0) + "/100" : "N/D"}</b><em>+{fmt(factor.contribution || 0)} pts</em></div>)}</div>
+                  {(alert.missing_data || []).length > 0 && <p className="v2-missing">Données manquantes : {alert.missing_data.join(" · ")}</p>}
+                  {(alert.conditions || []).length > 0 && <><h4>Vérifications complémentaires</h4><div className="outcome-condition-list">{alert.conditions.map((condition, index) => <div key={condition.code || index}><strong>{condition.label || condition.code || "Vérification"}</strong><span>{condition.value === true ? "Oui" : condition.value === false ? "Non" : "Non vérifié"}</span><small>{condition.detail}</small></div>)}</div></>}
+                  <h4>Transactions associées</h4>
+                  {alert.trades?.length ? <div className="trade-table-wrap"><table className="trade-table"><thead><tr><th>Date</th><th>Issue</th><th>Prix</th><th>Montant</th><th>Transaction</th></tr></thead><tbody>{alert.trades.map(trade => <tr key={trade.trade_id}><td>{new Date(trade.traded_at).toLocaleString("fr-FR")}</td><td>{trade.outcome || alert.outcome || "—"}</td><td>{fmt(trade.price * 100)}%</td><td>{usd(trade.usd_amount)}</td><td><code>{trade.transaction_hash ? trade.transaction_hash.slice(0, 12) + "…" : trade.trade_id.slice(0, 12) + "…"}</code></td></tr>)}</tbody></table></div> : <p className="stats-empty">Transactions indisponibles dans l’historique brut.</p>}
+                </div>}
+              </article>) : <div className="stats-empty">Aucune alerte dans cette catégorie.</div>}
+            </div>}
+          </div>
         </section>
 
         <section className="stats-panel">
