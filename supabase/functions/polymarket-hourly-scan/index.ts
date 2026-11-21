@@ -1034,7 +1034,8 @@ Deno.serve(async (req: Request) => {
         .select("id", { count: "exact", head: true })
         .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
         .or(`end_date.is.null,end_date.gt.${new Date().toISOString()}`)
-        .gte("volume", minMarketVolume).gte("liquidity", minMarketLiquidity);
+        .or(`volume.gte.${minMarketVolume},volume.is.null`)
+        .or(`liquidity.gte.${minMarketLiquidity},liquidity.is.null`);
       if (countError) throw new Error(`Comptage catalogue éligible: ${countError.message}`);
       targetMarkets = Math.min(count ?? 0, caps.total);
     }
@@ -1050,7 +1051,8 @@ Deno.serve(async (req: Request) => {
           .select("id,condition_id,slug,liquidity,updated_at,end_date,closed,accepting_orders,category,volume")
           .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
           .or(`end_date.is.null,end_date.gt.${new Date().toISOString()}`)
-          .gte("volume", minMarketVolume).gte("liquidity", minMarketLiquidity)
+          .or(`volume.gte.${minMarketVolume},volume.is.null`)
+          .or(`liquidity.gte.${minMarketLiquidity},liquidity.is.null`)
           .order("volume", { ascending: false, nullsFirst: false })
           .range(batchStart, batchStart + batchSize - 1);
         if (pageError) throw new Error(`Lecture lot catalogue: ${pageError.message}`);
