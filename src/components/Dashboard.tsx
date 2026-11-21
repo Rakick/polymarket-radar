@@ -94,6 +94,22 @@ export default function Dashboard() {
           : Number(b.score || 0) - Number(a.score || 0));
   }, [alerts, query, sortBy]);
 
+  const visibleGroups = useMemo(() => {
+    const groups = new Map<string, Alert[]>();
+    for (const alert of visibleAlerts) {
+      const outcome = String(alert.outcome ?? alert.trades?.find(trade => trade.outcome)?.outcome ?? "unknown").trim().toLowerCase();
+      const key = `${alert.condition_id || alert.market_id}::${outcome}`;
+      groups.set(key, [...(groups.get(key) ?? []), alert]);
+    }
+    return [...groups.entries()].map(([key, items]) => ({
+      key,
+      alerts: items,
+      top: items[0],
+      totalUsd: items.reduce((sum, item) => sum + Number(item.total_usd || 0), 0),
+      wallets: new Set(items.map(item => item.wallet)).size,
+    })).sort((a, b) => Number(b.top.score || 0) - Number(a.top.score || 0));
+  }, [visibleAlerts]);
+
   const uniqueWallets = new Set(alerts.map(alert => alert.wallet)).size;
   const averageScore = alerts.length ? Math.round(alerts.reduce((sum, alert) => sum + alert.score, 0) / alerts.length) : 0;
   const priorityAlerts = alerts.filter(alert => alert.score >= 90).length;
@@ -121,14 +137,14 @@ export default function Dashboard() {
         </header>
 
         <section className="metric-grid">
-          <article className="metric-card metric-primary"><span className="metric-label">Alertes qualifiées</span><strong>{loading ? "—" : alerts.length}</strong><small>Score minimum : 50 / 100</small><span className="metric-icon">◈</span></article>
+          <article className="metric-card metric-primary"><span className="metric-label">Alertes qualifiées</span><strong>{loading ? "—" : visibleGroups.length}</strong><small>Paris affichés · montant minimum : 1 000 $</small><span className="metric-icon">◈</span></article>
           <article className="metric-card"><span className="metric-label">Score moyen</span><strong>{loading ? "—" : `${averageScore}/100`}</strong><small>Sur les alertes affichées</small><span className="metric-icon">↗</span></article>
           <article className="metric-card"><span className="metric-label">Portefeuilles suivis</span><strong>{loading ? "—" : uniqueWallets}</strong><small>Adresses distinctes</small><span className="metric-icon">◎</span></article>
           <article className="metric-card"><span className="metric-label">Priorité renforcée</span><strong>{loading ? "—" : priorityAlerts}</strong><small>Score ≥ 90 / 100</small><span className="metric-icon">✳</span></article>
         </section>
 
         <section className="alerts-section v2-main-section" id="alerts">
-          <div className="section-heading"><div><span className="eyebrow">UNIFIED ENGINE / INFORMED BUY SCORING</span><h2>Alertes BUY</h2><p>Une alerte est conservée à partir de 50/100. Les critères de vérification sont informatifs et ne bloquent pas sa création.</p></div><span className="result-count">{alerts.length} alerte{alerts.length > 1 ? "s" : ""}</span></div>
+          <div className="section-heading"><div><span className="eyebrow">UNIFIED ENGINE / INFORMED BUY SCORING</span><h2>Alertes BUY</h2><p>Un pari est affiché si son montant associé atteint 1 000 $. Les alertes du même marché et du même résultat sont regroupées, puis classées par meilleur score.</p></div><span className="result-count">{visibleGroups.length} pari{visibleGroups.length > 1 ? "s" : ""}</span></div>
 
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
@@ -139,49 +155,38 @@ export default function Dashboard() {
 
           {error && <div className="error-banner"><strong>Chargement impossible</strong><span>{error}</span><button onClick={() => void loadAlerts()}>Réessayer</button></div>}
           {loading && <div className="empty-state"><div className="loader" /><strong>Chargement des alertes</strong><span>Connexion sécurisée à votre espace Supabase…</span></div>}
-          {!loading && !error && visibleAlerts.length === 0 && <div className="empty-state"><span className="empty-icon">⌕</span><strong>{alerts.length ? "Aucun résultat pour cette recherche" : "Aucune alerte qualifiée pour le moment"}</strong><span>{alerts.length ? "Modifiez votre recherche." : "Les alertes apparaîtront lorsqu’un BUY obtient un score calculable d’au moins 50/100."}</span></div>}
+          {!loading && !error && visibleAlerts.length === 0 && <div className="empty-state"><span className="empty-icon">⌕</span><strong>{visibleGroups.length ? "Aucun résultat pour cette recherche" : "Aucun pari qualifié pour le moment"}</strong><span>{alerts.length ? "Modifiez votre recherche." : "Les alertes apparaîtront lorsqu’un BUY obtient un score calculable d’au moins 50/100."}</span></div>}
 
           <div className="alert-list">
-            {visibleAlerts.map(alert => {
-              const isOpen = expanded === alert.id;
-              return <article className={isOpen ? "alert-card expanded" : "alert-card"} key={alert.id}>
-                <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : alert.id)} aria-expanded={isOpen}>
-                  <div className="score-column"><span className="score-caption">SCORE UNIQUE</span><strong className={scoreClass(alert.score)}>{alert.score}</strong><span className="score-outof">/100</span></div>
+            {visibleGroups.map(group => {
+              const alert = group.top;
+              const isOpen = expanded === group.key;
+              return <article className={isOpen ? "alert-card bet-group expanded" : "alert-card bet-group"} key={group.key}>
+                <button className="alert-summary" onClick={() => setExpanded(isOpen ? null : group.key)} aria-expanded={isOpen}>
+                  <div className="score-column"><span className="score-caption">MEILLEUR SCORE</span><strong className={scoreClass(alert.score)}>{alert.score}</strong><span className="score-outof">/100</span></div>
                   <div className="alert-main">
                     <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className="side-buy">Achat · {alert.outcome || alert.trades?.find(trade => trade.outcome)?.outcome || "Résultat inconnu"}</span></div>
-                    <div className="alert-meta"><span>{alert.alert_type === "grouped" ? "◉ Achats groupés" : "◉ Achat isolé"}</span><span>Portefeuille <code>{shortWallet(alert.wallet)}</code></span><span>{date(alert.first_trade_at)}</span><span>Couverture {alert.coverage}%</span></div>
-                    <div className="alert-tags">{(alert.factors ?? []).filter(factor => factor.available).slice(0, 3).map(factor => <span key={factor.code}>{factor.label} <b>{Number(factor.subscore ?? 0).toFixed(0)}/100</b></span>)}</div>
+                    <div className="alert-meta"><span>◉ {group.alerts.length} alerte{group.alerts.length > 1 ? "s" : ""} pour ce pari</span><span>{group.wallets} portefeuille{group.wallets > 1 ? "s" : ""}</span><span>{date(alert.first_trade_at)}</span></div>
+                    <div className="alert-tags">{group.alerts.slice(1, 4).map(item => <span key={item.id}>Score <b>{item.score}/100</b></span>)}</div>
                   </div>
-                  <div className="amount-column"><span>Montant associé</span><strong>{moneyAmount(alert.total_usd)}</strong><small>{alert.trades?.length ?? alert.trade_ids?.length ?? 0} transaction(s)</small></div>
+                  <div className="amount-column"><span>Montant cumulé</span><strong>{moneyAmount(group.totalUsd)}</strong><small>{group.alerts.length} signal(aux)</small></div>
                   <span className="expand-icon">{isOpen ? "−" : "+"}</span>
                 </button>
-
-                {isOpen && <div className="alert-details">
-                  <div className="detail-grid">
-                    <div className="detail-block"><span className="detail-label">PORTEFEUILLE</span><strong className="mono">{shortWallet(alert.wallet)}</strong><div className="wallet-actions"><button className="text-action" onClick={() => navigator.clipboard?.writeText(alert.wallet)}>Copier l’adresse</button><a className="text-action" href={`https://polymarket.com/profile/${encodeURIComponent(alert.wallet)}`} target="_blank" rel="noreferrer">Voir le profil Polymarket ↗</a></div></div>
-                    <div className="detail-block"><span className="detail-label">PRIX MOYEN PONDÉRÉ</span><strong>{alert.price_avg == null ? "—" : `${(Number(alert.price_avg) * 100).toFixed(2)} %`}</strong></div>
-                    <div className="detail-block"><span className="detail-label">PRIX MINIMUM</span><strong>{alert.price_min == null ? "—" : `${(Number(alert.price_min) * 100).toFixed(2)} %`}</strong></div>
-                    <div className="detail-block"><span className="detail-label">PREMIÈRE TRANSACTION</span><strong>{date(alert.first_trade_at)}</strong></div>
-                    <div className="detail-block"><span className="detail-label">DERNIÈRE TRANSACTION</span><strong>{date(alert.last_trade_at)}</strong></div>
-                    <div className="detail-block"><span className="detail-label">CATÉGORIE</span><strong>{alert.market?.category || "—"}</strong></div>
-                  </div>
-
-                  <div className="detail-section v2-panel">
-                    <div className="subheading-row"><h4>Décomposition du score · {alert.score}/100</h4><span>{alert.coverage}% des pondérations calculées · {alert.model_version || "recalcul en attente"}</span></div>
-                    <p className="v2-disclaimer">Les facteurs indisponibles contribuent zéro point. Leurs poids ne sont pas redistribués entre les autres facteurs.</p>
-                    <div className="factor-list">{(alert.factors ?? []).map(factor => <div className="factor-row" key={factor.code}><span className={factor.available ? "factor-dot factor-dot-v2" : "factor-dot"} /><div><strong>{factor.label}</strong><small>{factor.detail}</small></div><b>{factor.available ? `${Number(factor.subscore ?? 0).toFixed(1)}/100 · ${factor.weight}% · +${Number(factor.contribution ?? 0).toFixed(1)} pts` : `Indisponible · ${factor.weight}%`}</b></div>)}</div>
-                    {(alert.missing_data ?? []).length > 0 && <p className="v2-missing">Données à compléter : {alert.missing_data.join(" · ")}</p>}
-                  </div>
-
-                  <div className="detail-section">
-                    <div className="subheading-row"><h4>Six critères de vérification</h4><span>Information — aucun critère ne bloque l’alerte</span></div>
-                    <div className="factor-list">{(alert.conditions ?? []).map(condition => <div className="factor-row" key={condition.code}><span className="factor-dot factor-dot-v2" /><div><strong>{condition.label}</strong><small>{condition.detail}</small></div><b className={condition.value === true ? "condition-yes" : condition.value === false ? "condition-no" : "condition-unknown"} title={condition.value === true ? "Oui" : condition.value === false ? "Non" : "Inconnu"} aria-label={condition.value === true ? "Oui" : condition.value === false ? "Non" : "Inconnu"}>{condition.value === true ? "✅" : condition.value === false ? "❌" : "⚪"}</b></div>)}</div>
-                  </div>
-
-                  <div className="detail-section"><div className="subheading-row"><h4>Transactions associées</h4><span>{alert.trades?.length ?? 0} chargée(s) / {alert.trade_ids?.length ?? 0} référencée(s)</span></div>
-                    {alert.trades?.length ? <div className="trade-table-wrap"><table className="trade-table"><thead><tr><th>DATE</th><th>SENS</th><th>ISSUE</th><th>PRIX</th><th>QUANTITÉ</th><th>MONTANT</th><th>TRANSACTION</th></tr></thead><tbody>{alert.trades.map(trade => <tr key={trade.trade_id}><td>{date(trade.traded_at)}</td><td><span className="side-buy">Achat</span></td><td>{trade.outcome || alert.outcome || "—"}</td><td>{(Number(trade.price) * 100).toFixed(2)} %</td><td>{Number(trade.size).toLocaleString("fr-FR", { maximumFractionDigits: 2 })}</td><td>{money(trade.usd_amount)}</td><td><code>{trade.transaction_hash ? trade.transaction_hash.slice(0, 10) + "…" : trade.trade_id.slice(0, 10) + "…"}</code></td></tr>)}</tbody></table></div> : <p className="no-trades">Les identifiants sont conservés, mais les détails de ces transactions ne sont plus disponibles dans l’historique brut.</p>}
-                  </div>
-                  <div className="detail-footer"><span>ID marché : <code>{alert.market_id}</code></span><span>Condition : <code>{shortWallet(alert.condition_id)}</code></span>{alert.market?.url && <a href={alert.market.url} target="_blank" rel="noreferrer">Ouvrir le marché sur Polymarket ↗</a>}</div>
+                {isOpen && <div className="bet-group-details">
+                  <div className="bet-group-heading"><strong>{group.alerts.length} alertes liées à ce pari</strong><span>Classées du meilleur au moins bon score</span></div>
+                  {group.alerts.map(item => <section className="bet-alert-item" key={item.id}>
+                    <div className="bet-alert-head">
+                      <div className="bet-alert-score"><strong className={scoreClass(item.score)}>{item.score}</strong><span>/100</span></div>
+                      <div className="bet-alert-wallet"><strong>{shortWallet(item.wallet)}</strong><small>{date(item.first_trade_at)} · {item.coverage}% de couverture</small></div>
+                      <div className="bet-alert-amount"><strong>{money(item.total_usd)}</strong><small>{item.trades?.length ?? item.trade_ids?.length ?? 0} transaction(s)</small></div>
+                    </div>
+                    <div className="bet-alert-details">
+                      <div className="bet-alert-links"><a className="text-action" href={`https://polymarket.com/profile/${encodeURIComponent(item.wallet)}`} target="_blank" rel="noreferrer">Profil Polymarket ↗</a>{item.market?.url && <a className="text-action" href={item.market.url} target="_blank" rel="noreferrer">Ouvrir le pari ↗</a>}</div>
+                      <div className="bet-alert-factors">{(item.factors ?? []).filter(factor => factor.available).map(factor => <span key={factor.code}>{factor.label} <b>{Number(factor.subscore ?? 0).toFixed(0)}/100</b></span>)}</div>
+                      {(item.missing_data ?? []).length > 0 && <p className="v2-missing">Données à compléter : {item.missing_data.join(" · ")}</p>}
+                      {item.trades?.length ? <div className="trade-table-wrap"><table className="trade-table"><thead><tr><th>DATE</th><th>ISSUE</th><th>PRIX</th><th>MONTANT</th><th>TRANSACTION</th></tr></thead><tbody>{item.trades.map(trade => <tr key={trade.trade_id}><td>{date(trade.traded_at)}</td><td>{trade.outcome || item.outcome || "—"}</td><td>{(Number(trade.price) * 100).toFixed(2)} %</td><td>{money(trade.usd_amount)}</td><td><code>{trade.transaction_hash ? trade.transaction_hash.slice(0, 10) + "…" : trade.trade_id.slice(0, 10) + "…"}</code></td></tr>)}</tbody></table></div> : <p className="no-trades">Détails des transactions non disponibles dans l’historique brut.</p>}
+                    </div>
+                  </section>)}
                 </div>}
               </article>;
             })}
