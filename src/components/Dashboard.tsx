@@ -36,6 +36,7 @@ export default function Dashboard() {
   const [updatedAt, setUpdatedAt] = useState("");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [sortMode, setSortMode] = useState<"score" | "end_date">("score");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
   useEffect(() => {
@@ -103,8 +104,15 @@ export default function Dashboard() {
         totalUsd: ranked.reduce((sum, item) => sum + Number(item.total_usd || 0), 0),
         wallets: new Set(ranked.map(item => item.wallet)).size,
       };
-    }).sort((a, b) => Number(b.top.score || 0) - Number(a.top.score || 0));
-  }, [visibleAlerts]);
+    }).sort((a, b) => {
+      if (sortMode === "end_date") {
+        const aEnd = a.top.market?.end_date ? new Date(a.top.market.end_date).getTime() : Number.POSITIVE_INFINITY;
+        const bEnd = b.top.market?.end_date ? new Date(b.top.market.end_date).getTime() : Number.POSITIVE_INFINITY;
+        return aEnd - bEnd || Number(b.top.score || 0) - Number(a.top.score || 0);
+      }
+      return Number(b.top.score || 0) - Number(a.top.score || 0);
+    });
+  }, [visibleAlerts, sortMode]);
 
   const uniqueWallets = new Set(alerts.map(alert => alert.wallet)).size;
   const averageScore = alerts.length ? Math.round(alerts.reduce((sum, alert) => sum + alert.score, 0) / alerts.length) : 0;
@@ -145,7 +153,7 @@ export default function Dashboard() {
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
             <div className="toolbar-controls">
-              <div className="sort-control"><span>Classement</span><strong>Meilleur score en premier</strong></div>
+              <label className="sort-control"><span>Classement</span><select value={sortMode} onChange={event => setSortMode(event.target.value as "score" | "end_date")}><option value="score">Meilleur score en premier</option><option value="end_date">Fin du pari la plus proche</option></select></label>
             </div>
           </div>
 
@@ -162,7 +170,7 @@ export default function Dashboard() {
                   <div className="score-column"><span className="score-caption">MEILLEUR SCORE</span><strong className={scoreClass(alert.score)}>{alert.score}</strong><span className="score-outof">/100</span></div>
                   <div className="alert-main">
                     <div className="alert-title-row"><h3>{alert.market?.question || "Marché non retrouvé"}</h3><span className="side-buy">Achat · {alert.outcome || alert.trades?.find(trade => trade.outcome)?.outcome || "Résultat inconnu"}</span></div>
-                    <div className="alert-meta"><span>◉ {group.alerts.length} alerte{group.alerts.length > 1 ? "s" : ""} pour ce pari</span><span>{group.wallets} portefeuille{group.wallets > 1 ? "s" : ""}</span><span>{date(alert.first_trade_at)}</span></div>
+                    <div className="alert-meta"><span>◉ {group.alerts.length} alerte{group.alerts.length > 1 ? "s" : ""} pour ce pari</span><span>{group.wallets} portefeuille{group.wallets > 1 ? "s" : ""}</span><span>Fin : {date(alert.market?.end_date)}</span></div>
                     <div className="alert-tags">{group.alerts.slice(1, 4).map(item => <span key={item.id}>Score <b>{item.score}/100</b></span>)}</div>
                   </div>
                   <div className="amount-column"><span>Montant cumulé</span><strong>{moneyAmount(group.totalUsd)}</strong><small>{group.alerts.length} signal(aux)</small></div>
