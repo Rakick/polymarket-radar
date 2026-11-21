@@ -208,6 +208,7 @@ type ScoringCache = {
 };
 const MODEL_VERSION = "informed-buy-v1";
 const DISPLAY_SCORE_MIN = 50;
+const MIN_ALERT_USD = 1000;
 const HISTORY_PAGE_SIZE = 1000;
 const HISTORY_MAX_PAGES = 40;
 const WINDOW_MS = 30 * 60 * 1000;
@@ -503,6 +504,13 @@ async function persistScoredAlert(
   cache: ScoringCache,
   existingId?: string,
 ): Promise<{ saved: boolean; deleted: boolean; score: number; coverage: number }> {
+  if (Number(candidate.total_usd) < MIN_ALERT_USD) {
+    if (existingId) {
+      const { error } = await db.from("alerts").delete().eq("id", existingId);
+      if (error) throw error;
+    }
+    return { saved: false, deleted: Boolean(existingId), score: 0, coverage: 0 };
+  }
   const result = await scoreAlertCandidate(candidate, localTrades, cache);
   if (result.coverage === 0) return { saved: false, deleted: false, score: result.score, coverage: 0 };
   // Preserve historical alerts with their actual computed score, even below the
@@ -613,6 +621,7 @@ async function rescorePendingAlerts(cache: ScoringCache, limit = 8) {
 async function enqueueAlertCandidates(candidates: Array<{ row: AlertCandidate; trades: Trade[] }>) {
   let enqueued = 0;
   for (const { row } of candidates) {
+    if (Number(row.total_usd) < MIN_ALERT_USD) continue;
     const { data: existing, error: lookupError } = await db
       .from("informed_buy_candidate_queue")
       .select("candidate,status")
@@ -783,6 +792,20 @@ async function processQueuedCandidates(cache: ScoringCache, limit = 1) {
       const candidate = queued.candidate as AlertCandidate;
       if (!candidate?.wallet || !candidate.condition_id || !candidate.first_trade_at) {
         throw new Error("Candidat incomplet dans la file persistante");
+      }
+      if (Number(candidate.total_usd) < MIN_ALERT_USD) {
+        const existingId = await findExistingAlert(candidate);
+        if (existingId) {
+          const { error: deleteError } = await db.from("alerts").delete().eq("id", existingId);
+          if (deleteError) throw deleteError;
+          deleted++;
+        }
+        const { error: doneError } = await db.from("informed_buy_candidate_queue")
+          .update({ status: "done", last_error: null, updated_at: new Date().toISOString() })
+          .eq("id", queued.id);
+        if (doneError) throw doneError;
+        completed++;
+        continue;
       }
       let localTrades: Trade[] = [];
       const ids = candidate.trade_ids ?? [];
