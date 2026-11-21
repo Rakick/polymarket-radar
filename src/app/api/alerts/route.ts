@@ -7,6 +7,7 @@ export const revalidate = 0;
 
 const MODEL_VERSION = "informed-buy-v1";
 const DISPLAY_MIN_SCORE = 50;
+const MIN_ALERT_USD = 1000;
 
 export async function GET(request: NextRequest) {
   if (!(await hasAuthenticatedUser(request))) {
@@ -19,6 +20,7 @@ export async function GET(request: NextRequest) {
       .select("*")
       .eq("model_version", MODEL_VERSION)
       .gte("score", DISPLAY_MIN_SCORE)
+      .gte("total_usd", MIN_ALERT_USD)
       .order("score", { ascending: false })
       .order("first_trade_at", { ascending: false })
       .limit(500);
