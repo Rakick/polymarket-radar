@@ -998,7 +998,8 @@ Deno.serve(async (req: Request) => {
     }
     // Vérifie la fraîcheur du catalogue sans transférer ses milliers de lignes.
     const [latestResult, categoryChecks] = await Promise.all([
-      db.from("markets").select("updated_at").in("category", settings.categories)
+      db.from("markets").select("updated_at")
+        .eq("closed", false).eq("accepting_orders", true).in("category", settings.categories)
         .order("updated_at", { ascending: false }).limit(1).maybeSingle(),
       Promise.all(settings.categories.map(category =>
         db.from("markets").select("id", { count: "exact", head: true })
