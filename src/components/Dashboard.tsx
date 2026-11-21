@@ -152,7 +152,7 @@ export default function Dashboard() {
           <div className="toolbar">
             <label className="search-box"><span>⌕</span><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Rechercher un marché, un portefeuille…" /></label>
             <div className="toolbar-controls">
-              <label className="sort-control"><span>Trier par</span><select value={sortBy} onChange={event => setSortBy(event.target.value)}><option value="score_desc">Score : décroissant</option><option value="score_asc">Score : croissant</option><option value="amount_desc">Montant : décroissant</option><option value="amount_asc">Montant : croissant</option></select></label>
+              <div className="sort-control"><span>Classement</span><strong>Meilleur score en premier</strong></div>
             </div>
           </div>
 
