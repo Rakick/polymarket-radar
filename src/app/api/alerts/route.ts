@@ -19,9 +19,8 @@ export async function GET(request: NextRequest) {
     const { data: alerts, error } = await db.from("alerts")
       .select("*")
       .eq("model_version", MODEL_VERSION)
-      // The normal qualification thresholds remain unchanged. Only explicitly
-      // recovered historical alerts bypass them; these rows carry no reconstructed score.
-      .or(`and(score.gte.${DISPLAY_MIN_SCORE},total_usd.gte.${MIN_ALERT_USD}),source_system.eq.recovered_unscored`)
+      .gte("score", DISPLAY_MIN_SCORE)
+      .gte("total_usd", MIN_ALERT_USD)
       .order("score", { ascending: false })
       .order("first_trade_at", { ascending: false })
       .limit(500);
@@ -49,7 +48,6 @@ export async function GET(request: NextRequest) {
           .filter(Boolean);
         return {
           ...alert,
-          score_status: alert.source_system === "recovered_unscored" ? "not_reconstructed" : "reconstructed",
           side: "BUY",
           // Legacy alerts may have a null outcome even though their stored fills
           // contain it. Use the transaction as the source of truth for display.
