@@ -35,7 +35,6 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState("");
   const [query, setQuery] = useState("");
-  const [sortBy, setSortBy] = useState("score_desc");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
 
@@ -85,14 +84,8 @@ export default function Dashboard() {
       alert.wallet, alert.market?.question, alert.condition_id, alert.outcome,
       ...(alert.factors ?? []).map(factor => factor.label),
     ].some(value => String(value ?? "").toLowerCase().includes(needle)));
-    return filtered.sort((a, b) => sortBy === "amount_desc"
-      ? Number(b.total_usd || 0) - Number(a.total_usd || 0)
-      : sortBy === "amount_asc"
-        ? Number(a.total_usd || 0) - Number(b.total_usd || 0)
-        : sortBy === "score_asc"
-          ? Number(a.score || 0) - Number(b.score || 0)
-          : Number(b.score || 0) - Number(a.score || 0));
-  }, [alerts, query, sortBy]);
+    return filtered.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  }, [alerts, query]);
 
   const visibleGroups = useMemo(() => {
     const groups = new Map<string, Alert[]>();
